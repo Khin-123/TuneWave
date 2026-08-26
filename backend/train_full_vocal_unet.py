@@ -9,7 +9,9 @@ chunks requested by a DataLoader.
 from __future__ import annotations
 
 import argparse
+import json
 import random
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -346,6 +348,46 @@ def _save(
     )
 
 
+def _load_history(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    with path.open('r', encoding='utf-8') as handle:
+        data = json.load(handle)
+    if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+        raise ValueError(f'training history must be a JSON list of records: {path}')
+    return list(data)
+
+
+def _write_history(path: Path, history: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('w', encoding='utf-8') as handle:
+        json.dump(history, handle, indent=2)
+        handle.write('\n')
+
+
+def _record_history(path: Path, record: dict[str, Any]) -> None:
+    history = _load_history(path)
+    epoch = int(record['epoch'])
+    history = [item for item in history if int(item.get('epoch', -1)) != epoch]
+    history.append(record)
+    history.sort(key=lambda item: int(item.get('epoch', -1)))
+    _write_history(path, history)
+
+
+def _append_training_log(path: Path, message: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    with path.open('a', encoding='utf-8') as handle:
+        handle.write(f'[{timestamp}] {message}\n')
+
+
+def _write_training_config(path: Path, config: FullTrainingConfig) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('w', encoding='utf-8') as handle:
+        json.dump(asdict(config), handle, indent=2, default=str)
+        handle.write('\n')
+
+
 def run_full_training(
     train_dataset: Dataset[Any],
     validation_dataset: Dataset[Any],
@@ -378,11 +420,19 @@ def run_full_training(
     train_loader = _loader(train_dataset, config, shuffle=True)
     validation_loader = _loader(validation_dataset, config, shuffle=False)
     results: list[FullEpochResult] = []
-    stale_epochs = 0
     best_path = config.checkpoint_dir / config.best_checkpoint_name
     last_path = config.checkpoint_dir / config.last_checkpoint_name
+    history_path = config.checkpoint_dir / 'training_history.json'
+    log_path = config.checkpoint_dir / 'training.log'
+    _write_training_config(config.checkpoint_dir / 'training_config.json', config)
+    _append_training_log(
+        log_path,
+        f'training start epoch={start_epoch} final_epoch={config.epochs} '
+        f'device={device} mixed_precision={amp_enabled} stale_epochs={stale_epochs}',
+    )
 
     for epoch in range(start_epoch, config.epochs + 1):
+        epoch_started = time.perf_counter()
         train_loss, _, _ = _epoch(
             model,
             train_loader,
@@ -452,6 +502,26 @@ def run_full_training(
             f"epoch {epoch}/{config.epochs} train_loss={train_loss:.6f} "
             f"validation_loss={validation_loss:.6f} lr={learning_rate:.2e} "
             f"mask_range=[{mask_minimum:.4f}, {mask_maximum:.4f}]"
+        )
+        elapsed_epoch_seconds = time.perf_counter() - epoch_started
+        _record_history(
+            history_path,
+            {
+                'epoch': epoch,
+                'train_loss': train_loss,
+                'validation_loss': validation_loss,
+                'learning_rate': learning_rate,
+                'is_best': bool(improved),
+                'stale_epochs': stale_epochs,
+                'elapsed_epoch_seconds': elapsed_epoch_seconds,
+            },
+        )
+        _append_training_log(
+            log_path,
+            f'epoch={epoch} train_loss={train_loss:.8f} '
+            f'validation_loss={validation_loss:.8f} lr={learning_rate:.8g} '
+            f'is_best={bool(improved)} stale_epochs={stale_epochs} '
+            f'elapsed_epoch_seconds={elapsed_epoch_seconds:.4f}',
         )
         if (
             config.early_stopping_patience is not None
