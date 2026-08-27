@@ -1,6 +1,3 @@
-import { useEffect, useState } from 'react'
-
-
 function formatDuration(duration) {
   const roundedDuration = Math.round(duration * 100) / 100
   const minutes = Math.floor(roundedDuration / 60)
@@ -9,21 +6,51 @@ function formatDuration(duration) {
 }
 
 
-function downloadUrl(audioUrl) {
-  return `${audioUrl}${audioUrl.includes('?') ? '&' : '?'}download=1`
+function Visualization({ label, src, alt }) {
+  if (!src) return null
+
+  return (
+    <figure className="visualization">
+      <figcaption>{label}</figcaption>
+      <img src={src} alt={alt} loading="lazy" />
+    </figure>
+  )
+}
+
+
+function AudioResultCard({ title, source, downloadLabel, className = '' }) {
+  return (
+    <article className={`audio-card ${className}`.trim()}>
+      <h3>{title}</h3>
+      {source.audio_url && (
+        <audio controls preload="metadata" src={source.audio_url}>
+          Your browser does not support audio playback.
+        </audio>
+      )}
+      <div className="visualization-grid">
+        <Visualization
+          label="Waveform — Time Domain"
+          src={source.waveform_url}
+          alt={`${title} audio waveform over time`}
+        />
+        <Visualization
+          label="Spectrogram — Time-Frequency Domain"
+          src={source.spectrogram_url}
+          alt={`${title} audio frequency spectrogram`}
+        />
+      </div>
+      {source.download_url && (
+        <a className="download-button" href={source.download_url} download>
+          {downloadLabel}
+        </a>
+      )}
+    </article>
+  )
 }
 
 
 function MusicResultsPage({ result, onStartOver }) {
-  const [originalAudioUrl, setOriginalAudioUrl] = useState('')
-
-  useEffect(() => {
-    const objectUrl = URL.createObjectURL(result.originalFile)
-    setOriginalAudioUrl(objectUrl)
-    return () => URL.revokeObjectURL(objectUrl)
-  }, [result.originalFile])
-
-  const { original } = result
+  const { original, vocals, instrumental } = result
 
   return (
     <section className="results-page" aria-labelledby="results-heading">
@@ -44,43 +71,19 @@ function MusicResultsPage({ result, onStartOver }) {
         <div><dt>Samples</dt><dd>{original.samples.toLocaleString()}</dd></div>
       </dl>
 
-      <article className="audio-card original-card">
-        <h3>Original</h3>
-        {originalAudioUrl && (
-          <audio controls preload="metadata" src={originalAudioUrl}>
-            Your browser does not support audio playback.
-          </audio>
-        )}
-      </article>
+      <AudioResultCard title="Original" source={original} className="original-card" />
 
       <div className="stem-grid">
-        <article className="audio-card">
-          <h3>Vocals</h3>
-          <audio controls preload="metadata" src={result.vocal_audio_url}>
-            Your browser does not support audio playback.
-          </audio>
-          <a
-            className="download-button"
-            href={downloadUrl(result.vocal_audio_url)}
-            download="vocals.wav"
-          >
-            Download vocals
-          </a>
-        </article>
-
-        <article className="audio-card">
-          <h3>Instrumental</h3>
-          <audio controls preload="metadata" src={result.instrumental_audio_url}>
-            Your browser does not support audio playback.
-          </audio>
-          <a
-            className="download-button"
-            href={downloadUrl(result.instrumental_audio_url)}
-            download="instrumental.wav"
-          >
-            Download instrumental
-          </a>
-        </article>
+        <AudioResultCard
+          title="Vocals"
+          source={vocals}
+          downloadLabel="Download vocals"
+        />
+        <AudioResultCard
+          title="Instrumental"
+          source={instrumental}
+          downloadLabel="Download instrumental"
+        />
       </div>
     </section>
   )

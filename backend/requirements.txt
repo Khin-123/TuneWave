@@ -3,7 +3,8 @@ Flask-Cors
 numpy
 scipy
 librosa
+matplotlib
 soundfile
-musdb
-stempeg
 torch
+torchaudio
+openunmix

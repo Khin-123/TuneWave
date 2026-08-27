@@ -1,6 +1,9 @@
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
 .venv/
 venv/
 
@@ -9,11 +12,16 @@ backend/uploads/*
 !backend/uploads/.gitkeep
 backend/outputs/*
 !backend/outputs/.gitkeep
+/outputs/
 
 # MUSDB18 dataset
 dataset/
 musdb18/
 *.stem.mp4
+
+# Local demo/test audio (supply your own short stereo file)
+/test_audio/
+/demo_audio/
 
 # Model checkpoints and training outputs
 *.pth
@@ -21,6 +29,7 @@ checkpoints/
 training_outputs/
 runs/
 models/checkpoints/
+backend/models/
 
 # Node/Vite
 frontend/node_modules/

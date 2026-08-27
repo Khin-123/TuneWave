@@ -1,127 +1,159 @@
 # TuneWave
 
-TuneWave is a university project for classical DSP-based audio source separation and speech enhancement. The current modules provide a React/Vite frontend, a Flask API, and basic audio upload and metadata extraction. DSP processing is intentionally not implemented yet.
+TuneWave is a university project combining classical digital signal
+processing with pretrained machine learning for music separation. The planned
+speech-enhancement path uses classical DSP.
 
-## Prerequisites
+## Final architecture
 
-- Node.js 18 or newer
-- Python 3.10 or newer
+### Music separation
 
-## Run the backend
+~~~
+Stereo 44.1 kHz audio
+→ 30-second chunks with 2-second overlap
+→ Hann-window STFT
+→ complex mixture spectrum and magnitude
+→ pretrained Open-Unmix UMXL vocals model
+→ residual multichannel Wiener reconstruction
+→ instrumental complex spectrum = mixture − vocals
+→ ISTFT
+→ weighted overlap-add and shared clipping protection
+→ vocals.wav + instrumental.wav
+~~~
 
-From the `tunewave` directory:
+Open-Unmix supplies learned vocal-spectrum estimates. TuneWave owns the
+stereo handling, STFT, magnitude/phase analysis, Wiener reconstruction,
+mixture-consistent residual, ISTFT, overlap-add, and output protection.
+The production path loads only the vocals UMXL target; it does not load
+drums, bass, or other models. UMXL weights are pretrained and downloaded by
+Open-Unmix on first use. They are distributed under CC BY-NC-SA 4.0.
 
-```powershell
+The former classical Mid/Side separator in
+'backend/dsp/source_separation.py' is retained as a DSP-only baseline for
+comparison. The former custom U-Net/training experiment has been removed from
+the application tree.
+
+### Speech enhancement
+
+~~~
+Noisy speech
+→ Hann/STFT
+→ noise estimation
+→ Wiener filtering
+→ ISTFT
+→ enhanced speech
+~~~
+
+Speech enhancement is specified as a classical-DSP path and does not use
+Open-Unmix. No speech-enhancement Flask endpoint is currently present in this
+repository.
+
+## Requirements
+
+- Python 3.10+
+- Node.js 20.19+ or 22.12+
+- 'backend/requirements.txt'
+- Matching PyTorch and TorchAudio builds
+- FFmpeg available on PATH when decoding formats unsupported by libsndfile
+
+Install Python dependencies:
+
+~~~
 cd backend
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+~~~
+
+The application does not require MUSDB18. TuneWave does not train UMXL; the old
+compressed MUSDB18 training workflow and Kaggle instructions are no longer part
+of the final system. CPU inference is supported, though a short input is
+recommended for faster demonstrations.
+
+## Run Flask and React
+
+From the repository root:
+
+~~~
+cd backend
 python app.py
-```
+~~~
 
-The API runs at `http://localhost:5000`. Verify it directly at `http://localhost:5000/api/health`.
+In a second terminal:
 
-## Run the frontend
-
-In a second terminal, from the `tunewave` directory:
-
-```powershell
+~~~
 cd frontend
 npm install
 npm run dev
-```
+~~~
 
-Open the URL printed by Vite (normally `http://localhost:5173`). With the backend running, the page displays `Backend: connected`.
+Flask runs at http://localhost:5000; Vite normally runs at
+http://localhost:5173 and proxies /api requests to Flask.
 
-## Module 1 API
+## Music API
 
-### `GET /api/health`
+'POST /api/separate' accepts a stereo WAV, MP3, or FLAC upload in the
+multipart field 'file'. It returns playback/download URLs for 'original',
+'vocals', and 'instrumental', including waveform and spectrogram image URLs.
+Each request receives an isolated output directory under
+'backend/outputs/<job-id>/'.
 
-Response:
+The production implementation is
+'backend/separation/openunmix_dsp_separator.py'. It supports CPU and uses
+CUDA automatically when available. The cached model key includes model name
+and device, so UMXL and UMXHQ weights cannot be accidentally mixed.
 
-```json
-{
-  "status": "ok"
-}
-```
+Run a bounded verification:
 
-## Module 2 API
+~~~
+python test_openunmix_chunked_separator.py --input test_audio/test_song.wav --output-dir outputs/openunmix_umxl_test --chunk-seconds 30 --overlap-seconds 2 --device cpu --niter 2
+~~~
 
-### `POST /api/audio-info`
+The local 'test_audio/' directory is intentionally ignored. Place your own
+short, stereo 44.1 kHz WAV/MP3/FLAC there (for example 'test_song.wav') before
+running this command; do not commit commercial music.
 
-Send a WAV, MP3, or FLAC file as the `file` field in `multipart/form-data`:
+The verifier reports chunk count, model-load/processing time, consistency
+errors, shared gain, and validates stereo 44.1 kHz output.
 
-```powershell
-curl.exe -X POST -F "file=@C:\path\to\audio.wav" http://localhost:5000/api/audio-info
-```
+## Tests
 
-The response contains the original filename, sample rate, duration in seconds, channel count, and number of samples per channel.
-
-## Run backend tests
-
-With the backend virtual environment activated:
-
-```powershell
+~~~
 cd backend
-python -m unittest discover -s tests -v
-```
+python -m pytest tests/test_source_separation.py tests/test_openunmix_chunking.py tests/test_separation_api.py -q
+~~~
 
-## Module 3 DSP utilities
+Build the frontend:
 
-`backend/dsp/stft_utils.py` provides reusable functions for:
+~~~
+cd frontend
+npm run build
+~~~
 
-- Standard Hann window generation
-- Overlapping audio framing
-- Complex STFT calculation
-- Magnitude and phase extraction
-- ISTFT overlap-add reconstruction with exact output-length handling
+## Project structure
 
-The utilities process one real-valued audio channel at a time. Run the backend
-test command above to verify generated sine-wave and short-signal STFT/ISTFT
-reconstruction.
+~~~
+backend/
+  app.py
+  dsp/
+    audio_utils.py
+    audio_visualization.py
+    mid_side.py
+    source_separation.py       # DSP-only baseline
+    stft_utils.py
+  separation/
+    openunmix_separator.py     # pretrained API proof of concept
+    openunmix_dsp_separator.py # final production UMXL pipeline
+  tests/
+frontend/
+  src/
+~~~
 
-## Module 4 mid-side processing
+Generated uploads and outputs are ignored by Git. Pretrained weights are
+cached by PyTorch/Open-Unmix outside the source tree and are not committed.
 
-`backend/dsp/mid_side.py` provides reversible classical stereo mid-side
-processing:
+## Limitations
 
-- `encode_mid_side(stereo_audio)` converts channel-first left/right audio into
-  separate mid and side signals.
-- `decode_mid_side(mid, side)` reconstructs channel-first stereo audio.
-
-Mono input is rejected because mid-side processing requires distinct left and
-right channels. The backend test suite verifies the equations, reconstruction,
-and invalid-input handling.
-
-## Module 5 vocal and instrumental separation
-
-`backend/dsp/source_separation.py` implements classical stereo separation with
-this pipeline:
-
-```text
-Stereo audio -> Mid/Side -> STFT -> Soft spectral masks -> ISTFT -> Stems
-```
-
-The vocal mask favors mid-dominant time-frequency regions. Its complementary
-instrumental mask receives the remaining mid content, while the full side
-signal is retained in the instrumental stem. `separate_audio_file()` writes
-`vocals.wav` and `instrumental.wav` to `backend/outputs` by default.
-
-This approach assumes vocals are centered. Centered instruments can leak into
-the vocal stem, and off-center vocals can leak into the instrumental stem.
-
-## Module 6 music-separation API and UI
-
-### `POST /api/separate`
-
-Send stereo WAV, MP3, or FLAC audio in the multipart field named `file`. The
-route calls `dsp/source_separation.py` and returns original audio information
-plus playback URLs for the generated vocal and instrumental stems.
-
-Generated files are stored in a unique subdirectory under `backend/outputs`.
-The returned URLs support inline playback, and appending `?download=1` serves a
-stem as a download.
-
-The React music-separation flow provides original preview, processing status,
-result players, and download buttons. Start Flask and Vite using the commands
-above, then open the Vite URL to test the complete flow.
+Open-Unmix inference is compute-intensive on CPU, especially for long songs.
+Chunking bounds peak spectral memory and overlap-add reduces boundary
+discontinuities, but a long request can still take substantial time.
+Separation quality depends on the pretrained UMXL model and may include vocal
+or instrumental leakage. The system currently requires stereo 44.1 kHz input.

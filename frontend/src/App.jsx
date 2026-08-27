@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import MusicResultsPage from './pages/MusicResultsPage.jsx'
 import MusicSeparationPage from './pages/MusicSeparationPage.jsx'
+import { checkBackend as checkBackendRequest } from './services/api.js'
 
 function App() {
   const [backendStatus, setBackendStatus] = useState('checking')
@@ -11,13 +12,7 @@ function App() {
 
     async function checkBackend() {
       try {
-        const response = await fetch('/api/health', { signal: controller.signal })
-
-        if (!response.ok) {
-          throw new Error(`Health check failed with status ${response.status}`)
-        }
-
-        const data = await response.json()
+        const data = await checkBackendRequest(controller.signal)
         setBackendStatus(data.status === 'ok' ? 'connected' : 'unavailable')
       } catch (error) {
         if (error.name !== 'AbortError') {

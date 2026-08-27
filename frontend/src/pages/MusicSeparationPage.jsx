@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { separateAudio as separateAudioRequest } from '../services/api.js'
 
 
 const ACCEPTED_EXTENSIONS = ['wav', 'mp3', 'flac']
@@ -7,6 +8,12 @@ const ACCEPTED_EXTENSIONS = ['wav', 'mp3', 'flac']
 function acceptsAudioFile(file) {
   const extension = file.name.split('.').pop()?.toLowerCase()
   return ACCEPTED_EXTENSIONS.includes(extension)
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
 }
 
 
@@ -30,6 +37,7 @@ function MusicSeparationPage({ onSeparated }) {
   }, [selectedFile])
 
   function selectFile(file) {
+    if (isProcessing) return
     setError('')
 
     if (!file) {
@@ -58,28 +66,18 @@ function MusicSeparationPage({ onSeparated }) {
       return
     }
 
-    const formData = new FormData()
-    formData.append('file', selectedFile)
     setIsProcessing(true)
     setError('')
 
     try {
-      const response = await fetch('/api/separate', {
-        method: 'POST',
-        body: formData,
-      })
-      const result = await response.json().catch(() => ({}))
-
-      if (!response.ok || !result.success) {
-        throw new Error(result.error || 'Audio separation failed.')
-      }
-
-      onSeparated({
-        ...result,
-        originalFile: selectedFile,
-      })
+      const result = await separateAudioRequest(selectedFile)
+      onSeparated(result)
     } catch (separationError) {
-      setError(separationError.message || 'Unable to connect to the backend.')
+      if (separationError.name === 'TypeError') {
+        setError('The Flask server is unavailable. Start the backend and try again.')
+      } else {
+        setError(separationError.message || 'Audio separation failed.')
+      }
     } finally {
       setIsProcessing(false)
     }
@@ -128,7 +126,7 @@ function MusicSeparationPage({ onSeparated }) {
 
       {selectedFile && (
         <div className="selection">
-          <p><strong>Selected:</strong> {selectedFile.name}</p>
+          <p><strong>Selected:</strong> {selectedFile.name} ({formatFileSize(selectedFile.size)})</p>
           {previewUrl && (
             <audio controls preload="metadata" src={previewUrl}>
               Your browser does not support audio playback.
@@ -147,7 +145,8 @@ function MusicSeparationPage({ onSeparated }) {
 
       {isProcessing && (
         <p className="processing-message" role="status">
-          Processing the full-resolution audio with mid-side spectral masking...
+          <span className="loading-indicator" aria-hidden="true" />
+          Separating audio...
         </p>
       )}
     </section>

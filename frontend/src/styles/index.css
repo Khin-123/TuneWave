@@ -161,12 +161,29 @@ audio {
 }
 
 .processing-message {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
   margin: 0;
   padding: 0.8rem 1rem;
   border-radius: 0.55rem;
   color: #1e40af;
   background: #dbeafe;
   text-align: center;
+}
+
+.loading-indicator {
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .results-header {
@@ -230,6 +247,33 @@ audio {
   border-radius: 0.75rem;
 }
 
+.visualization-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.visualization {
+  min-width: 0;
+  margin: 0;
+}
+
+.visualization figcaption {
+  margin-bottom: 0.45rem;
+  color: #475569;
+  font-size: 0.85rem;
+  font-weight: 650;
+}
+
+.visualization img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  background: #ffffff;
+}
+
 .original-card {
   background: #f8fafc;
 }
@@ -256,7 +300,8 @@ audio {
   }
 
   .result-metadata,
-  .stem-grid {
+  .stem-grid,
+  .visualization-grid {
     grid-template-columns: 1fr;
   }
 }
