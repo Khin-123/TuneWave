@@ -10,13 +10,21 @@ from werkzeug.utils import secure_filename
 
 try:
     from .dsp.audio_utils import AudioLoadError, extract_audio_info
-    from .dsp.audio_visualization import generate_separation_visualizations
+    from .dsp.audio_visualization import (
+        generate_audio_visualizations,
+        generate_separation_visualizations,
+    )
     from .dsp.source_separation import separate_audio_file
+    from .speech.wiener_enhancer import enhance_audio_file as enhance_speech_audio_file
 except ImportError:
     # Allows both `python app.py` and package-style imports during tests.
     from dsp.audio_utils import AudioLoadError, extract_audio_info
-    from dsp.audio_visualization import generate_separation_visualizations
+    from dsp.audio_visualization import (
+        generate_audio_visualizations,
+        generate_separation_visualizations,
+    )
     from dsp.source_separation import separate_audio_file
+    from speech.wiener_enhancer import enhance_audio_file as enhance_speech_audio_file
 
 try:
     from .separation.openunmix_dsp_separator import (
@@ -38,6 +46,12 @@ ALLOWED_OUTPUT_FILES = {
     "vocals_spectrogram.png",
     "instrumental_waveform.png",
     "instrumental_spectrogram.png",
+    "original_noisy.wav",
+    "enhanced_speech.wav",
+    "original_noisy_waveform.png",
+    "original_noisy_spectrogram.png",
+    "enhanced_waveform.png",
+    "enhanced_spectrogram.png",
 }
 DEFAULT_UPLOAD_FOLDER = Path(__file__).resolve().parent / "uploads"
 DEFAULT_OUTPUT_FOLDER = Path(__file__).resolve().parent / "outputs"
@@ -212,6 +226,80 @@ def create_app(test_config: dict | None = None) -> Flask:
             # Keep the legacy fields for existing clients.
             vocal_audio_url=vocal_url,
             instrumental_audio_url=instrumental_url,
+        )
+
+    @app.post("/api/enhance-speech")
+    def enhance_speech():
+        try:
+            stored_path, display_filename = _store_uploaded_audio(
+                request.files.get("file"),
+                app.config["UPLOAD_FOLDER"],
+            )
+        except UploadValidationError as error:
+            return jsonify(success=False, error=str(error)), 400
+
+        job_identifier = uuid4().hex
+        output_directory = Path(app.config["OUTPUT_FOLDER"]) / job_identifier
+
+        try:
+            original_info = extract_audio_info(stored_path, filename=display_filename)
+            result = enhance_speech_audio_file(stored_path, output_directory)
+            output_paths = result.get("paths", {})
+            for output_name in ("original_noisy", "enhanced_speech"):
+                output_path = Path(output_paths.get(output_name, ""))
+                if output_path.resolve().parent != output_directory.resolve() or not output_path.is_file():
+                    raise RuntimeError(f"missing speech-enhancement output: {output_name}")
+            generate_audio_visualizations(
+                output_paths["original_noisy"],
+                output_directory,
+                "original_noisy",
+            )
+            generate_audio_visualizations(
+                output_paths["enhanced_speech"],
+                output_directory,
+                "enhanced",
+            )
+        except (AudioLoadError, ValueError) as error:
+            stored_path.unlink(missing_ok=True)
+            return jsonify(success=False, error=str(error)), 400
+        except Exception:
+            stored_path.unlink(missing_ok=True)
+            app.logger.exception("speech enhancement failed")
+            return jsonify(success=False, error="Speech enhancement failed."), 500
+
+        stored_path.unlink(missing_ok=True)
+
+        def output_url(filename: str) -> str:
+            return url_for(
+                "serve_separation_output",
+                job_identifier=job_identifier,
+                filename=filename,
+            )
+
+        original_audio_url = output_url("original_noisy.wav")
+        enhanced_audio_url = output_url("enhanced_speech.wav")
+        return jsonify(
+            success=True,
+            original={
+                **original_info,
+                "audio_url": original_audio_url,
+                "waveform_url": output_url("original_noisy_waveform.png"),
+                "spectrogram_url": output_url("original_noisy_spectrogram.png"),
+            },
+            enhanced={
+                "audio_url": enhanced_audio_url,
+                "download_url": f"{enhanced_audio_url}?download=1",
+                "waveform_url": output_url("enhanced_waveform.png"),
+                "spectrogram_url": output_url("enhanced_spectrogram.png"),
+            },
+            processing={
+                "sample_rate": result["sample_rate"],
+                "duration": result["duration_seconds"],
+                "noise_estimation": (
+                    "Automatic" if result["noise_estimation"] == "auto" else "Initial interval"
+                ),
+                "processing_time": result["processing_seconds"],
+            },
         )
 
     @app.get("/api/outputs/<job_identifier>/<filename>")

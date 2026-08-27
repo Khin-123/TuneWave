@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { ErrorMessage, ProcessingMessage } from '../components/StatusMessage.jsx'
 import { separateAudio as separateAudioRequest } from '../services/api.js'
 
 
@@ -60,6 +61,13 @@ function MusicSeparationPage({ onSeparated }) {
     selectFile(event.dataTransfer.files[0])
   }
 
+  function removeFile() {
+    if (isProcessing) return
+    setSelectedFile(null)
+    setError('')
+    if (inputRef.current) inputRef.current.value = ''
+  }
+
   async function separateAudio() {
     if (!selectedFile) {
       setError('Select a stereo audio file before starting separation.')
@@ -86,8 +94,8 @@ function MusicSeparationPage({ onSeparated }) {
   return (
     <section className="uploader music-page" aria-labelledby="separation-heading" aria-busy={isProcessing}>
       <div className="section-heading">
-        <h2 id="separation-heading">Music separation</h2>
-        <p>Upload a stereo song to create vocal and instrumental stems.</p>
+        <h2 id="separation-heading">Music Separation</h2>
+        <p>Separate vocals and instrumental audio.</p>
       </div>
 
       <div
@@ -100,15 +108,19 @@ function MusicSeparationPage({ onSeparated }) {
         onDragLeave={() => setIsDragging(false)}
         onDrop={handleDrop}
       >
-        <strong>Drag and drop a stereo song here</strong>
-        <span>WAV, MP3, or FLAC</span>
+        <span className="upload-mark" aria-hidden="true">↑</span>
+        <div className="drop-zone-copy">
+          <strong>Drop an audio file here</strong>
+          <span>or choose a file</span>
+          <small>MP3, WAV, FLAC</small>
+        </div>
         <button
           type="button"
           className="secondary-button"
           onClick={() => inputRef.current?.click()}
           disabled={isProcessing}
         >
-          Browse file
+          Choose File
         </button>
         <input
           ref={inputRef}
@@ -122,11 +134,35 @@ function MusicSeparationPage({ onSeparated }) {
         />
       </div>
 
-      {error && <p className="message error-message" role="alert">{error}</p>}
+      {error && <ErrorMessage onDismiss={() => setError('')}>{error}</ErrorMessage>}
 
       {selectedFile && (
         <div className="selection">
-          <p><strong>Selected:</strong> {selectedFile.name} ({formatFileSize(selectedFile.size)})</p>
+          <div className="selected-file-heading">
+            <div>
+              <span className="selection-label">Selected audio</span>
+              <strong>{selectedFile.name}</strong>
+            </div>
+            <div className="selected-file-actions">
+              <span className="file-size">{formatFileSize(selectedFile.size)}</span>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => inputRef.current?.click()}
+                disabled={isProcessing}
+              >
+                Change File
+              </button>
+              <button
+                type="button"
+                className="text-button is-danger"
+                onClick={removeFile}
+                disabled={isProcessing}
+              >
+                Remove
+              </button>
+            </div>
+          </div>
           {previewUrl && (
             <audio controls preload="metadata" src={previewUrl}>
               Your browser does not support audio playback.
@@ -144,10 +180,7 @@ function MusicSeparationPage({ onSeparated }) {
       )}
 
       {isProcessing && (
-        <p className="processing-message" role="status">
-          <span className="loading-indicator" aria-hidden="true" />
-          Separating audio...
-        </p>
+        <ProcessingMessage>Separating audio...</ProcessingMessage>
       )}
     </section>
   )

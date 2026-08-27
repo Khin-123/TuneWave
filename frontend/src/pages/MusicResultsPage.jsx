@@ -12,7 +12,9 @@ function Visualization({ label, src, alt }) {
   return (
     <figure className="visualization">
       <figcaption>{label}</figcaption>
-      <img src={src} alt={alt} loading="lazy" />
+      <div className="visualization-frame">
+        <img src={src} alt={alt} loading="lazy" />
+      </div>
     </figure>
   )
 }
@@ -29,12 +31,12 @@ function AudioResultCard({ title, source, downloadLabel, className = '' }) {
       )}
       <div className="visualization-grid">
         <Visualization
-          label="Waveform — Time Domain"
+          label="Waveform"
           src={source.waveform_url}
           alt={`${title} audio waveform over time`}
         />
         <Visualization
-          label="Spectrogram — Time-Frequency Domain"
+          label="Spectrogram"
           src={source.spectrogram_url}
           alt={`${title} audio frequency spectrogram`}
         />
@@ -71,18 +73,22 @@ function MusicResultsPage({ result, onStartOver }) {
         <div><dt>Samples</dt><dd>{original.samples.toLocaleString()}</dd></div>
       </dl>
 
-      <AudioResultCard title="Original" source={original} className="original-card" />
+      <AudioResultCard
+        title="Original"
+        source={original}
+        className="original-card"
+      />
 
       <div className="stem-grid">
         <AudioResultCard
           title="Vocals"
           source={vocals}
-          downloadLabel="Download vocals"
+          downloadLabel="Download Vocals"
         />
         <AudioResultCard
           title="Instrumental"
           source={instrumental}
-          downloadLabel="Download instrumental"
+          downloadLabel="Download Instrumental"
         />
       </div>
     </section>

@@ -39,6 +39,22 @@ export async function separateAudio(file, signal) {
   }
 }
 
+export async function enhanceSpeech(file, signal) {
+  const formData = new FormData()
+  formData.append('file', file)
+  const response = await fetch(apiUrl('/api/enhance-speech'), {
+    method: 'POST',
+    body: formData,
+    signal,
+  })
+  const result = await parseResponse(response)
+  return {
+    ...result,
+    original: resolveSourceUrls(result.original),
+    enhanced: resolveSourceUrls(result.enhanced),
+  }
+}
+
 function resolveSourceUrls(source = {}) {
   return {
     ...source,

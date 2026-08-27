@@ -1,0 +1,221 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+
+from speech.wiener_enhancer import (
+    SpeechEnhancementConfig,
+    compute_wiener_gain,
+    enhance_audio,
+    enhance_audio_file,
+    estimate_noise_power,
+    select_low_energy_noise_frames,
+    smooth_wiener_gain,
+    speech_stft_parameters,
+)
+
+
+class SpeechEnhancementTestCase(unittest.TestCase):
+    @staticmethod
+    def synthetic_speech(sample_rate: int = 16_000, duration: float = 1.0):
+        generator = np.random.default_rng(1234)
+        samples = int(round(sample_rate * duration))
+        time = np.arange(samples, dtype=np.float64) / sample_rate
+        clean = (
+            0.25 * np.sin(2 * np.pi * 180 * time)
+            + 0.12 * np.sin(2 * np.pi * 360 * time)
+            + 0.06 * np.sin(2 * np.pi * 720 * time)
+        )
+        envelope = np.clip((time - 0.2) / 0.05, 0.0, 1.0)
+        clean *= envelope
+        noise = generator.normal(0.0, 0.06, samples)
+        return clean.astype(np.float32), (clean + noise).astype(np.float32), noise
+
+    def test_mono_duration_and_finite_output_at_common_rates(self):
+        for sample_rate in (8_000, 16_000, 44_100, 48_000):
+            with self.subTest(sample_rate=sample_rate):
+                _, noisy, _ = self.synthetic_speech(sample_rate, duration=0.6)
+                enhanced, diagnostics = enhance_audio(noisy, sample_rate)
+                self.assertEqual(enhanced.shape, noisy.shape)
+                self.assertTrue(np.isfinite(enhanced).all())
+                self.assertEqual(diagnostics["sample_rate"], sample_rate)
+                self.assertEqual(diagnostics["channels"], 1)
+                self.assertGreater(diagnostics["frames"], 0)
+                self.assertEqual(diagnostics["noise_estimation"], "auto")
+                self.assertGreaterEqual(diagnostics["noise_frames"], 8)
+                self.assertLessEqual(diagnostics["noise_frames_percent"], 20.0)
+
+    def test_default_stft_parameters_are_25_ms_with_75_percent_overlap(self):
+        frame_length, hop_length = speech_stft_parameters(
+            16_000,
+            SpeechEnhancementConfig(),
+        )
+        self.assertEqual(frame_length, 400)
+        self.assertEqual(hop_length, 100)
+
+    def test_silence_remains_finite_silence(self):
+        silence = np.zeros(8_000, dtype=np.float32)
+        enhanced, diagnostics = enhance_audio(silence, 16_000)
+        np.testing.assert_array_equal(enhanced, silence)
+        self.assertEqual(diagnostics["output_peak"], 0.0)
+
+    def test_synthetic_noise_only_prefix_is_attenuated(self):
+        sample_rate = 16_000
+        _, noisy, _ = self.synthetic_speech(sample_rate)
+        enhanced, _ = enhance_audio(
+            noisy,
+            sample_rate,
+            SpeechEnhancementConfig(
+                noise_estimation="initial",
+                noise_duration_seconds=0.2,
+            ),
+        )
+        prefix_samples = int(0.15 * sample_rate)
+        input_prefix_power = float(np.mean(noisy[:prefix_samples] ** 2))
+        output_prefix_power = float(np.mean(enhanced[:prefix_samples] ** 2))
+        self.assertLess(output_prefix_power, input_prefix_power)
+        self.assertFalse(np.allclose(enhanced, noisy))
+
+    def test_stereo_is_processed_per_channel_and_preserved(self):
+        sample_rate = 16_000
+        _, noisy, _ = self.synthetic_speech(sample_rate)
+        stereo = np.vstack((noisy, 0.8 * noisy + 0.01)).astype(np.float32)
+        enhanced, diagnostics = enhance_audio(stereo, sample_rate)
+        self.assertEqual(enhanced.shape, stereo.shape)
+        self.assertEqual(diagnostics["channels"], 2)
+        self.assertTrue(np.isfinite(enhanced).all())
+        self.assertFalse(np.array_equal(enhanced[0], enhanced[1]))
+
+    def test_shared_clipping_protection(self):
+        time = np.arange(8_000) / 8_000
+        loud = (2.0 * np.sin(2 * np.pi * 220 * time)).astype(np.float32)
+        enhanced, diagnostics = enhance_audio(loud, 8_000)
+        self.assertLessEqual(float(np.max(np.abs(enhanced))), 0.99 + 1e-6)
+        self.assertLessEqual(diagnostics["shared_output_gain"], 1.0)
+
+    def test_wiener_gain_is_finite_and_bounded(self):
+        noisy_power = np.array([[0.0, 1.0, 4.0], [0.5, 2.0, 8.0]])
+        noise_power = np.array([[1.0], [0.5]])
+        gain = compute_wiener_gain(
+            noisy_power,
+            noise_power,
+            min_gain=0.10,
+        )
+        self.assertTrue(np.isfinite(gain).all())
+        self.assertTrue(np.all(gain >= 0.10))
+        self.assertTrue(np.all(gain <= 1.0))
+        expected = np.maximum(noisy_power - noise_power, 0.0)
+        expected /= expected + noise_power + 1e-10
+        np.testing.assert_allclose(gain, np.clip(expected, 0.10, 1.0))
+
+        one_dimensional_gain = compute_wiener_gain(
+            noisy_power,
+            np.array([1.0, 0.5]),
+        )
+        np.testing.assert_allclose(one_dimensional_gain, gain)
+
+    def test_low_energy_selector_uses_requested_fraction_and_minimum(self):
+        energy = np.array([9.0, 1.0, 8.0, 2.0, 7.0, 3.0, 6.0, 4.0, 5.0, 10.0])
+        selected = select_low_energy_noise_frames(
+            energy,
+            frame_percent=0.2,
+            minimum_frames=3,
+        )
+        np.testing.assert_array_equal(selected, np.array([1, 3, 5]))
+
+        short_selected = select_low_energy_noise_frames(
+            energy[:4],
+            frame_percent=0.15,
+            minimum_frames=8,
+        )
+        np.testing.assert_array_equal(short_selected, np.arange(4))
+
+    def test_gain_smoothing_is_moderate_finite_and_bounded(self):
+        gain = np.ones((7, 7), dtype=np.float64)
+        gain[3, 3] = 0.10
+        smoothed = smooth_wiener_gain(gain, min_gain=0.10)
+        self.assertTrue(np.isfinite(smoothed).all())
+        self.assertTrue(np.all(smoothed >= 0.10))
+        self.assertTrue(np.all(smoothed <= 1.0))
+        self.assertGreater(smoothed[3, 3], gain[3, 3])
+        self.assertLess(smoothed[3, 2], gain[3, 2])
+        self.assertLess(float(np.var(smoothed)), float(np.var(gain)))
+
+    def test_initial_noise_estimation_remains_available(self):
+        sample_rate = 16_000
+        _, noisy, _ = self.synthetic_speech(sample_rate)
+        _, diagnostics = enhance_audio(
+            noisy,
+            sample_rate,
+            SpeechEnhancementConfig(
+                noise_estimation="initial",
+                noise_duration_seconds=0.25,
+            ),
+        )
+        self.assertEqual(diagnostics["noise_estimation"], "initial")
+        self.assertAlmostEqual(
+            diagnostics["noise_estimation_duration_seconds"],
+            0.25,
+        )
+
+    def test_requested_quality_diagnostics_are_finite_percentages(self):
+        sample_rate = 16_000
+        _, noisy, _ = self.synthetic_speech(sample_rate)
+        _, diagnostics = enhance_audio(noisy, sample_rate)
+        for key in ("input_rms", "output_rms", "mean_wiener_gain"):
+            self.assertTrue(np.isfinite(diagnostics[key]))
+        self.assertGreaterEqual(diagnostics["mean_wiener_gain"], 0.10)
+        self.assertLessEqual(diagnostics["mean_wiener_gain"], 1.0)
+        for key in (
+            "noise_frames_percent",
+            "bins_attenuated_over_3_db_percent",
+            "bins_attenuated_over_6_db_percent",
+        ):
+            self.assertGreaterEqual(diagnostics[key], 0.0)
+            self.assertLessEqual(diagnostics[key], 100.0)
+        self.assertGreaterEqual(
+            diagnostics["bins_attenuated_over_3_db_percent"],
+            diagnostics["bins_attenuated_over_6_db_percent"],
+        )
+
+    def test_rejects_empty_nonfinite_and_multichannel_audio(self):
+        invalid_inputs = (
+            np.array([], dtype=np.float32),
+            np.array([0.0, np.nan], dtype=np.float32),
+            np.zeros((3, 100), dtype=np.float32),
+        )
+        for audio in invalid_inputs:
+            with self.subTest(shape=audio.shape):
+                with self.assertRaises(ValueError):
+                    enhance_audio(audio, 16_000)
+
+    def test_noise_percentile_is_robust_to_one_loud_frame(self):
+        spectrum = np.ones((4, 10), dtype=np.complex128)
+        spectrum[:, 3] = 100.0
+        estimate = estimate_noise_power(spectrum, 0, 10, percentile=20.0)
+        np.testing.assert_allclose(estimate, 1.0)
+
+    def test_file_enhancement_writes_expected_mono_wavs(self):
+        sample_rate = 16_000
+        _, noisy, _ = self.synthetic_speech(sample_rate, duration=0.4)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            input_path = directory / "noisy.wav"
+            sf.write(input_path, noisy, sample_rate, subtype="PCM_16")
+            result = enhance_audio_file(input_path, directory / "outputs")
+            self.assertEqual(
+                set(result["paths"]),
+                {"original_noisy", "enhanced_speech"},
+            )
+            for path in result["paths"].values():
+                info = sf.info(path)
+                self.assertTrue(path.is_file())
+                self.assertEqual(info.samplerate, sample_rate)
+                self.assertEqual(info.channels, 1)
+                self.assertEqual(info.frames, noisy.size)
+
+
+if __name__ == "__main__":
+    unittest.main()

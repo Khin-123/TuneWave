@@ -17,7 +17,13 @@ from .stft_utils import DEFAULT_HOP_LENGTH, DEFAULT_N_FFT, magnitude, stft
 
 DEFAULT_MAX_WAVEFORM_POINTS = 4_000
 DEFAULT_MIN_DB = -80.0
-VISUALIZATION_NAMES = ("original", "vocals", "instrumental")
+VISUALIZATION_NAMES = (
+    "original",
+    "vocals",
+    "instrumental",
+    "original_noisy",
+    "enhanced",
+)
 
 
 def _as_visualization_mono(audio: np.ndarray) -> np.ndarray:
