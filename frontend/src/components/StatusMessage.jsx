@@ -19,10 +19,19 @@ export function ErrorMessage({ children, onDismiss }) {
 export function ProcessingMessage({ children }) {
   return (
     <div className="processing-message" role="status">
-      <span className="loading-indicator" aria-hidden="true" />
+      <span className="processing-visual" aria-hidden="true">
+        <span className="loading-indicator" />
+        <span className="equalizer">
+          <i />
+          <i />
+          <i />
+          <i />
+          <i />
+        </span>
+      </span>
       <div>
         <strong>{children}</strong>
-        <p>This may take a moment.</p>
+        <p>We’re working through the audio. This may take a moment.</p>
       </div>
     </div>
   )

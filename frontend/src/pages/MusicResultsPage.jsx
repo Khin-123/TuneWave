@@ -1,99 +1,52 @@
+import AudioResultCard from '../components/AudioResultCard.jsx'
+
 function formatDuration(duration) {
   const roundedDuration = Math.round(duration * 100) / 100
   const minutes = Math.floor(roundedDuration / 60)
   const seconds = roundedDuration - minutes * 60
-  return `${minutes}:${seconds.toFixed(2).padStart(5, '0')}`
+  return minutes + ':' + seconds.toFixed(2).padStart(5, '0')
 }
-
-
-function Visualization({ label, src, alt }) {
-  if (!src) return null
-
-  return (
-    <figure className="visualization">
-      <figcaption>{label}</figcaption>
-      <div className="visualization-frame">
-        <img src={src} alt={alt} loading="lazy" />
-      </div>
-    </figure>
-  )
-}
-
-
-function AudioResultCard({ title, source, downloadLabel, className = '' }) {
-  return (
-    <article className={`audio-card ${className}`.trim()}>
-      <h3>{title}</h3>
-      {source.audio_url && (
-        <audio controls preload="metadata" src={source.audio_url}>
-          Your browser does not support audio playback.
-        </audio>
-      )}
-      <div className="visualization-grid">
-        <Visualization
-          label="Waveform"
-          src={source.waveform_url}
-          alt={`${title} audio waveform over time`}
-        />
-        <Visualization
-          label="Spectrogram"
-          src={source.spectrogram_url}
-          alt={`${title} audio frequency spectrogram`}
-        />
-      </div>
-      {source.download_url && (
-        <a className="download-button" href={source.download_url} download>
-          {downloadLabel}
-        </a>
-      )}
-    </article>
-  )
-}
-
 
 function MusicResultsPage({ result, onStartOver }) {
   const { original, vocals, instrumental } = result
 
   return (
-    <section className="results-page" aria-labelledby="results-heading">
+    <section className="results-page music-results-page" aria-labelledby="results-heading">
       <div className="results-header">
         <div>
-          <h2 id="results-heading">Separation results</h2>
-          <p>{original.filename}</p>
+          <span className="page-kicker success-kicker">
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <path d="m5.5 10.2 2.8 2.8 6.2-6.3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            Results ready
+          </span>
+          <h2 id="results-heading">Separation Complete</h2>
+          <p>Listen, compare, and download your tracks.</p>
+          <p className="result-filename"><span className="file-type-icon" aria-hidden="true">WAV</span>{original.filename}</p>
         </div>
         <button type="button" className="secondary-button" onClick={onStartOver}>
-          Separate another file
+          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <path d="M10 4v12M4 10h12" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+          </svg>
+          Separate Another File
         </button>
       </div>
 
-      <dl className="result-metadata">
+      <dl className="result-metadata compact-metadata">
         <div><dt>Duration</dt><dd>{formatDuration(original.duration)}</dd></div>
         <div><dt>Sample rate</dt><dd>{original.sample_rate.toLocaleString()} Hz</dd></div>
         <div><dt>Channels</dt><dd>{original.channels}</dd></div>
-        <div><dt>Samples</dt><dd>{original.samples.toLocaleString()}</dd></div>
       </dl>
 
-      <AudioResultCard
-        title="Original"
-        source={original}
-        className="original-card"
-      />
-
-      <div className="stem-grid">
-        <AudioResultCard
-          title="Vocals"
-          source={vocals}
-          downloadLabel="Download Vocals"
-        />
-        <AudioResultCard
-          title="Instrumental"
-          source={instrumental}
-          downloadLabel="Download Instrumental"
-        />
+      <div className="music-track-layout">
+        <AudioResultCard title="Original" source={original} className="original-card" downloadLabel="Download original" />
+        <div className="stem-grid">
+          <AudioResultCard title="Vocals" source={vocals} downloadLabel="Download vocals" />
+          <AudioResultCard title="Instrumental" source={instrumental} downloadLabel="Download instrumental" />
+        </div>
       </div>
     </section>
   )
 }
-
 
 export default MusicResultsPage

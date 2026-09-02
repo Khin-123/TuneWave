@@ -2,9 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ErrorMessage, ProcessingMessage } from '../components/StatusMessage.jsx'
 import { separateAudio as separateAudioRequest } from '../services/api.js'
 
-
 const ACCEPTED_EXTENSIONS = ['wav', 'mp3', 'flac']
-
 
 function acceptsAudioFile(file) {
   const extension = file.name.split('.').pop()?.toLowerCase()
@@ -12,11 +10,10 @@ function acceptsAudioFile(file) {
 }
 
 function formatFileSize(bytes) {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB'
 }
-
 
 function MusicSeparationPage({ onSeparated }) {
   const inputRef = useRef(null)
@@ -94,12 +91,13 @@ function MusicSeparationPage({ onSeparated }) {
   return (
     <section className="uploader music-page" aria-labelledby="separation-heading" aria-busy={isProcessing}>
       <div className="section-heading">
+        <span className="page-kicker">Music workspace</span>
         <h2 id="separation-heading">Music Separation</h2>
-        <p>Separate vocals and instrumental audio.</p>
+        <p>Pull a track apart into clean vocals and instrumental audio.</p>
       </div>
 
       <div
-        className={`drop-zone${isDragging ? ' is-dragging' : ''}`}
+        className={'drop-zone' + (isDragging ? ' is-dragging' : '')}
         onDragEnter={(event) => {
           event.preventDefault()
           setIsDragging(true)
@@ -108,11 +106,15 @@ function MusicSeparationPage({ onSeparated }) {
         onDragLeave={() => setIsDragging(false)}
         onDrop={handleDrop}
       >
-        <span className="upload-mark" aria-hidden="true">↑</span>
+        <span className="upload-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none">
+            <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14.5v3A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </span>
         <div className="drop-zone-copy">
-          <strong>Drop an audio file here</strong>
-          <span>or choose a file</span>
-          <small>MP3, WAV, FLAC</small>
+          <strong>Drop your audio file here</strong>
+          <span>or browse from your device</span>
+          <small>MP3 · WAV · FLAC · up to 200 MB</small>
         </div>
         <button
           type="button"
@@ -120,7 +122,7 @@ function MusicSeparationPage({ onSeparated }) {
           onClick={() => inputRef.current?.click()}
           disabled={isProcessing}
         >
-          Choose File
+          Browse files
         </button>
         <input
           ref={inputRef}
@@ -139,26 +141,16 @@ function MusicSeparationPage({ onSeparated }) {
       {selectedFile && (
         <div className="selection">
           <div className="selected-file-heading">
-            <div>
-              <span className="selection-label">Selected audio</span>
+            <div className="selected-file-name">
+              <span className="selection-label">Ready to separate</span>
               <strong>{selectedFile.name}</strong>
             </div>
             <div className="selected-file-actions">
               <span className="file-size">{formatFileSize(selectedFile.size)}</span>
-              <button
-                type="button"
-                className="text-button"
-                onClick={() => inputRef.current?.click()}
-                disabled={isProcessing}
-              >
-                Change File
+              <button type="button" className="text-button" onClick={() => inputRef.current?.click()} disabled={isProcessing}>
+                Change
               </button>
-              <button
-                type="button"
-                className="text-button is-danger"
-                onClick={removeFile}
-                disabled={isProcessing}
-              >
+              <button type="button" className="text-button is-danger" onClick={removeFile} disabled={isProcessing}>
                 Remove
               </button>
             </div>
@@ -168,13 +160,8 @@ function MusicSeparationPage({ onSeparated }) {
               Your browser does not support audio playback.
             </audio>
           )}
-          <button
-            type="button"
-            className="primary-button"
-            onClick={separateAudio}
-            disabled={isProcessing}
-          >
-            {isProcessing ? 'Separating audio...' : 'Separate Audio'}
+          <button type="button" className="primary-button" onClick={separateAudio} disabled={isProcessing}>
+            {isProcessing ? 'Separating audio...' : 'Separate audio'}
           </button>
         </div>
       )}
@@ -185,6 +172,5 @@ function MusicSeparationPage({ onSeparated }) {
     </section>
   )
 }
-
 
 export default MusicSeparationPage

@@ -1,23 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
 import { ErrorMessage, ProcessingMessage } from '../components/StatusMessage.jsx'
+import WorkflowSteps from '../components/WorkflowSteps.jsx'
 import { enhanceSpeech as enhanceSpeechRequest } from '../services/api.js'
-
 
 const ACCEPTED_EXTENSIONS = ['wav']
 
-
-function acceptsSpeechFile(file) {
+function acceptsAudioFile(file) {
   const extension = file.name.split('.').pop()?.toLowerCase()
   return ACCEPTED_EXTENSIONS.includes(extension)
 }
 
-
 function formatFileSize(bytes) {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB'
 }
-
 
 function SpeechEnhancementPage({ onEnhanced }) {
   const inputRef = useRef(null)
@@ -47,7 +44,7 @@ function SpeechEnhancementPage({ onEnhanced }) {
       return
     }
 
-    if (!acceptsSpeechFile(file)) {
+    if (!acceptsAudioFile(file)) {
       setSelectedFile(null)
       setError('Please select a WAV speech recording.')
       return
@@ -97,12 +94,15 @@ function SpeechEnhancementPage({ onEnhanced }) {
   return (
     <section className="uploader speech-page" aria-labelledby="speech-heading" aria-busy={isProcessing}>
       <div className="section-heading">
+        <span className="page-kicker">Speech workspace</span>
         <h2 id="speech-heading">Speech Enhancement</h2>
-        <p>Reduce background noise and improve speech clarity.</p>
+        <p>Reduce background noise and bring spoken words into focus.</p>
       </div>
 
+      <WorkflowSteps currentStep={isProcessing ? 2 : 1} />
+
       <div
-        className={`drop-zone${isDragging ? ' is-dragging' : ''}`}
+        className={'drop-zone' + (isDragging ? ' is-dragging' : '')}
         onDragEnter={(event) => {
           event.preventDefault()
           setIsDragging(true)
@@ -111,11 +111,15 @@ function SpeechEnhancementPage({ onEnhanced }) {
         onDragLeave={() => setIsDragging(false)}
         onDrop={handleDrop}
       >
-        <span className="upload-mark" aria-hidden="true">↑</span>
+        <span className="upload-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none">
+            <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14.5v3A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </span>
         <div className="drop-zone-copy">
-          <strong>Drop a WAV file here</strong>
-          <span>or choose a file</span>
-          <small>WAV</small>
+          <strong>Drop a speech recording here</strong>
+          <span>or browse from your device</span>
+          <small>WAV · up to 200 MB</small>
         </div>
         <button
           type="button"
@@ -123,7 +127,7 @@ function SpeechEnhancementPage({ onEnhanced }) {
           onClick={() => inputRef.current?.click()}
           disabled={isProcessing}
         >
-          Choose File
+          Browse files
         </button>
         <input
           ref={inputRef}
@@ -142,26 +146,16 @@ function SpeechEnhancementPage({ onEnhanced }) {
       {selectedFile && (
         <div className="selection">
           <div className="selected-file-heading">
-            <div>
-              <span className="selection-label">Selected audio</span>
+            <div className="selected-file-name">
+              <span className="selection-label">Ready to enhance</span>
               <strong>{selectedFile.name}</strong>
             </div>
             <div className="selected-file-actions">
               <span className="file-size">{formatFileSize(selectedFile.size)}</span>
-              <button
-                type="button"
-                className="text-button"
-                onClick={() => inputRef.current?.click()}
-                disabled={isProcessing}
-              >
-                Change File
+              <button type="button" className="text-button" onClick={() => inputRef.current?.click()} disabled={isProcessing}>
+                Change
               </button>
-              <button
-                type="button"
-                className="text-button is-danger"
-                onClick={removeFile}
-                disabled={isProcessing}
-              >
+              <button type="button" className="text-button is-danger" onClick={removeFile} disabled={isProcessing}>
                 Remove
               </button>
             </div>
@@ -171,13 +165,8 @@ function SpeechEnhancementPage({ onEnhanced }) {
               Your browser does not support audio playback.
             </audio>
           )}
-          <button
-            type="button"
-            className="primary-button"
-            onClick={enhanceSpeech}
-            disabled={isProcessing}
-          >
-            {isProcessing ? 'Enhancing speech...' : 'Enhance Speech'}
+          <button type="button" className="primary-button" onClick={enhanceSpeech} disabled={isProcessing}>
+            {isProcessing ? 'Enhancing speech...' : 'Enhance speech'}
           </button>
         </div>
       )}
@@ -188,6 +177,5 @@ function SpeechEnhancementPage({ onEnhanced }) {
     </section>
   )
 }
-
 
 export default SpeechEnhancementPage
