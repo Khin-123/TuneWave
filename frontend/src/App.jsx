@@ -1,183 +1,45 @@
 import { useEffect, useState } from 'react'
-import MusicResultsPage from './pages/MusicResultsPage.jsx'
-import MusicSeparationPage from './pages/MusicSeparationPage.jsx'
-import SpeechEnhancementPage from './pages/SpeechEnhancementPage.jsx'
-import SpeechEnhancementResultsPage from './pages/SpeechEnhancementResultsPage.jsx'
-import { checkBackend as checkBackendRequest } from './services/api.js'
-
-const ROUTES = {
-  music: '/music',
-  musicResults: '/music/results',
-  speech: '/speech-enhancement',
+import { Mark, UploadStudio, ResultsStudio } from './components/Studio.jsx'
+import { checkBackend } from './services/api.js'
+const paths = { music: '/music', speech: '/speech-enhancement' }
+function valid(result, mode) {
+  return (mode === 'music' ? ['original','vocals','instrumental'] : ['original','enhanced']).every(k => typeof result?.[k]?.audio_url === 'string' && result[k].audio_url.length > 0)
 }
-
-function routeFromPath() {
-  const path = window.location.pathname.replace(/\/+$/, '') || '/'
-
-  if (path === ROUTES.musicResults) return 'music-results'
-  if (path === ROUTES.speech) return 'speech'
-  return 'music'
+function readRoute() {
+  const path = window.location.pathname.replace(/\/+$/, '')
+  const mode = path.startsWith(paths.speech) ? 'speech' : 'music'
+  const result = window.history.state?.result || window.history.state?.separationResult
+  const isResults = path === paths[mode] + '/results' && valid(result, mode)
+  return { mode, result: isResults ? result : null }
 }
-
-function isValidSeparationResult(result) {
-  return Boolean(result?.original && result?.vocals && result?.instrumental)
-}
-
-const BACKEND_LABELS = {
-  checking: 'Checking backend',
-  connected: 'Backend connected',
-  unavailable: 'Backend unavailable',
-}
-
-function App() {
-  const [backendStatus, setBackendStatus] = useState('checking')
-  const [currentRoute, setCurrentRoute] = useState(routeFromPath)
-  const [separationResult, setSeparationResult] = useState(() => {
-    const historyResult = window.history.state?.separationResult
-    return isValidSeparationResult(historyResult) ? historyResult : null
-  })
-  const [speechResult, setSpeechResult] = useState(null)
-  const activeModule = currentRoute === 'speech' ? 'speech' : 'music'
-
+export default function App() {
+  const [route, setRoute] = useState(readRoute)
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState('Connecting')
   useEffect(() => {
     const controller = new AbortController()
-
-    async function checkBackend() {
-      try {
-        const data = await checkBackendRequest(controller.signal)
-        setBackendStatus(data.status === 'ok' ? 'connected' : 'unavailable')
-      } catch (error) {
-        if (error.name !== 'AbortError') {
-          setBackendStatus('unavailable')
-        }
-      }
+    checkBackend(controller.signal).then(r => setStatus(r.status === 'ok' ? 'Ready' : 'Unavailable')).catch(e => {if(e.name !== 'AbortError') setStatus('Unavailable')})
+    function sync() {
+      const next = readRoute()
+      window.history.replaceState(next.result ? { result: next.result } : {}, '', paths[next.mode] + (next.result ? '/results' : ''))
+      setRoute(next)
     }
-
-    checkBackend()
-
-    return () => controller.abort()
+    sync()
+    window.addEventListener('popstate', sync)
+    return () => { controller.abort(); window.removeEventListener('popstate',sync) }
   }, [])
-
-  useEffect(() => {
-    const route = routeFromPath()
-
-    if (route === 'music-results' && !isValidSeparationResult(window.history.state?.separationResult)) {
-      window.history.replaceState({}, '', ROUTES.music)
-      setCurrentRoute('music')
-    } else if (window.location.pathname === '/' || !Object.values(ROUTES).includes(window.location.pathname)) {
-      window.history.replaceState({}, '', ROUTES.music)
-      setCurrentRoute('music')
-    }
-
-    function handleNavigation(event) {
-      const nextRoute = routeFromPath()
-
-      if (nextRoute === 'music-results') {
-        const result = event.state?.separationResult
-        if (!isValidSeparationResult(result)) {
-          window.history.replaceState({}, '', ROUTES.music)
-          setSeparationResult(null)
-          setCurrentRoute('music')
-          return
-        }
-        setSeparationResult(result)
-      }
-
-      setCurrentRoute(nextRoute)
-    }
-
-    window.addEventListener('popstate', handleNavigation)
-    return () => window.removeEventListener('popstate', handleNavigation)
-  }, [])
-
-  function navigateTo(module) {
-    const path = module === 'speech' ? ROUTES.speech : ROUTES.music
-    if (window.location.pathname !== path) {
-      window.history.pushState({}, '', path)
-    }
-    setCurrentRoute(module)
-    window.scrollTo(0, 0)
+  function navigate(mode, result = null) {
+    window.history.pushState(result ? {result} : {}, '', paths[mode] + (result ? '/results' : ''))
+    setRoute({mode,result})
+    window.scrollTo(0,0)
   }
-
-  function showSeparationResults(result) {
-    setSeparationResult(result)
-    window.history.pushState({ separationResult: result }, '', ROUTES.musicResults)
-    setCurrentRoute('music-results')
-    window.scrollTo(0, 0)
-  }
-
-  function startAnotherSeparation() {
-    setSeparationResult(null)
-    window.history.pushState({}, '', ROUTES.music)
-    setCurrentRoute('music')
-    window.scrollTo(0, 0)
-  }
-
-  let currentPage
-  if (currentRoute === 'speech') {
-    currentPage = speechResult ? (
-      <SpeechEnhancementResultsPage
-        result={speechResult}
-        onStartOver={() => setSpeechResult(null)}
-      />
-    ) : (
-      <SpeechEnhancementPage onEnhanced={setSpeechResult} />
-    )
-  } else if (currentRoute === 'music-results' && isValidSeparationResult(separationResult)) {
-    currentPage = (
-      <MusicResultsPage
-        result={separationResult}
-        onStartOver={startAnotherSeparation}
-      />
-    )
-  } else {
-    currentPage = <MusicSeparationPage onSeparated={showSeparationResults} />
-  }
-
-  return (
-    <main className="app">
-      <header className="app-header">
-        <div className="header-summary">
-          <div className="brand-lockup">
-            <svg className="brand-logo" viewBox="0 0 164 36" role="img" aria-label="TuneWave">
-              <defs>
-                <linearGradient id="tunewave-logo-accent" x1="4" y1="4" x2="31" y2="32" gradientUnits="userSpaceOnUse">
-                  <stop stopColor="#a59cff" />
-                  <stop offset="1" stopColor="#6756e8" />
-                </linearGradient>
-              </defs>
-              <rect x="1" y="2" width="32" height="32" rx="10" fill="url(#tunewave-logo-accent)" />
-              <path d="M7 19h3l2.2-6 3.1 12 3.2-15 2.8 11 2.2-6 2 4H29" fill="none" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-              <text x="42" y="24.5" fill="currentColor" fontFamily="Inter, ui-sans-serif, system-ui, sans-serif" fontSize="18" fontWeight="760" letterSpacing="-0.7">TuneWave</text>
-            </svg>
-          </div>
-          <nav className="module-navigation" aria-label="TuneWave modules">
-            <button
-              type="button"
-              className={activeModule === 'music' ? 'is-active' : ''}
-              aria-current={activeModule === 'music' ? 'page' : undefined}
-              onClick={() => navigateTo('music')}
-            >
-              Music Separation
-            </button>
-            <button
-              type="button"
-              className={activeModule === 'speech' ? 'is-active' : ''}
-              aria-current={activeModule === 'speech' ? 'page' : undefined}
-              onClick={() => navigateTo('speech')}
-            >
-              Speech Enhancement
-            </button>
-          </nav>
-          <span className={`backend-status is-${backendStatus}`}>
-            <span className="status-dot" aria-hidden="true" />
-            {BACKEND_LABELS[backendStatus]}
-          </span>
-        </div>
-      </header>
-      <div className="app-content">{currentPage}</div>
-    </main>
-  )
+  return <div className="app">
+    <a className="skip-link" href="#workspace">Skip to workspace</a>
+    <header className="topbar"><a className="brand" href="/music" onClick={e => {e.preventDefault();if(!busy) navigate('music')}} aria-label="TuneWave home"><Mark/><span>TuneWave</span></a>
+      <nav aria-label="Audio tools">{Object.entries(paths).map(([mode,path]) => <a href={path} key={mode} aria-current={route.mode === mode ? 'page' : undefined} aria-disabled={busy} onClick={e => {if(e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return; e.preventDefault();if(!busy) navigate(mode)}}>{mode === 'music' ? 'Music Separation' : 'Speech Enhancement'}</a>)}</nav>
+      <span className={'service-status '+status.toLowerCase()}><i/>{status}</span>
+    </header>
+    <main id="workspace" className="workspace">{route.result ? <ResultsStudio key={route.mode + window.location.pathname} mode={route.mode} result={route.result} onStartOver={() => navigate(route.mode)}/> : <UploadStudio key={route.mode} mode={route.mode} onBusy={setBusy} onComplete={result => navigate(route.mode,result)}/>}</main>
+    <footer className="app-footer"><span>Made for a closer listen.</span><span>TuneWave / Audio workspace</span></footer>
+  </div>
 }
-
-export default App
