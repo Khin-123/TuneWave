@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from dsp.stft_utils import istft, stft
 from speech.wiener_enhancer import (
     SpeechEnhancementConfig,
     compute_wiener_gain,
@@ -13,6 +14,7 @@ from speech.wiener_enhancer import (
     estimate_noise_power,
     select_low_energy_noise_frames,
     smooth_wiener_gain,
+    spectral_subtraction,
     speech_stft_parameters,
 )
 
@@ -217,5 +219,87 @@ class SpeechEnhancementTestCase(unittest.TestCase):
                 self.assertEqual(info.frames, noisy.size)
 
 
+    def test_auto_noise_estimation_ranks_low_energy_frames_over_full_recording(self):
+        sample_rate = 16_000
+        _, noisy, _ = self.synthetic_speech(sample_rate, duration=1.0)
+        _, diagnostics = enhance_audio(noisy, sample_rate)
+        self.assertEqual(diagnostics["noise_estimation"], "auto")
+        self.assertEqual(diagnostics["noise_estimation_method"], "low_energy_frames")
+        self.assertIsNone(diagnostics["noise_estimation_duration_seconds"])
+        self.assertGreaterEqual(diagnostics["noise_frames_selected"], 8)
+        self.assertLess(diagnostics["noise_frames_selected"], diagnostics["number_of_frames"])
+
+    def test_spectral_subtraction_obeys_configured_floor(self):
+        noisy_magnitude = np.array([[10.0, 2.0], [1.0, 0.2]])
+        noise_magnitude = np.array([[8.0], [0.5]])
+        beta = 2.0
+        spectral_floor = 0.10
+        enhanced = spectral_subtraction(
+            noisy_magnitude,
+            noise_magnitude,
+            beta=beta,
+            spectral_floor=spectral_floor,
+        )
+        expected = np.maximum(
+            noisy_magnitude - beta * noise_magnitude,
+            spectral_floor * noisy_magnitude,
+        )
+        np.testing.assert_allclose(enhanced, expected)
+        self.assertTrue(np.all(enhanced[noisy_magnitude > 0] > 0))
+
+    def test_fft_ifft_reconstruction_sanity_for_speech_frames(self):
+        sample_rate = 16_000
+        samples = int(0.37 * sample_rate) + 17
+        time = np.arange(samples) / sample_rate
+        original = 0.4 * np.sin(2 * np.pi * 440 * time)
+        spectrum = stft(original, sample_rate, n_fft=400, hop_length=100)
+        reconstructed = istft(
+            spectrum,
+            sample_rate,
+            n_fft=400,
+            hop_length=100,
+            length=samples,
+        )
+        np.testing.assert_allclose(reconstructed, original, atol=1e-10)
+
+    def test_synthetic_noisy_speech_has_measurable_error_reduction(self):
+        sample_rate = 16_000
+        clean, noisy, _ = self.synthetic_speech(sample_rate, duration=1.0)
+        enhanced, diagnostics = enhance_audio(noisy, sample_rate)
+        noisy_error = float(np.mean((noisy - clean) ** 2))
+        enhanced_error = float(np.mean((enhanced - clean) ** 2))
+        self.assertLess(enhanced_error, noisy_error * 0.75)
+        self.assertGreater(diagnostics["subtraction_attenuated_bins_percent"], 0.0)
+
+    def test_output_level_compensation_reports_and_restores_level(self):
+        sample_rate = 16_000
+        _, noisy, _ = self.synthetic_speech(sample_rate, duration=1.0)
+        enhanced, diagnostics = enhance_audio(noisy, sample_rate)
+        self.assertTrue(np.isfinite(enhanced).all())
+        self.assertLess(diagnostics["output_rms_before_compensation"], diagnostics["input_rms"])
+        self.assertGreater(diagnostics["output_rms_after_compensation"], diagnostics["output_rms_before_compensation"])
+        self.assertGreater(diagnostics["compensation_gain"], 1.0)
+        self.assertGreaterEqual(
+            diagnostics["output_rms_after_compensation"],
+            diagnostics["input_rms"] * 0.90,
+        )
+
+    def test_stereo_file_preserves_channel_count_sample_rate_and_duration(self):
+        sample_rate = 16_000
+        _, noisy, _ = self.synthetic_speech(sample_rate, duration=0.4)
+        stereo = np.column_stack((noisy, 0.65 * noisy)).astype(np.float32)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            input_path = directory / "stereo_noisy.wav"
+            sf.write(input_path, stereo, sample_rate, subtype="PCM_16")
+            result = enhance_audio_file(input_path, directory / "outputs")
+            info = sf.info(result["paths"]["enhanced_speech"])
+            self.assertEqual(info.samplerate, sample_rate)
+            self.assertEqual(info.channels, 2)
+            self.assertEqual(info.frames, stereo.shape[0])
+            enhanced, _ = enhance_audio(stereo.T, sample_rate)
+            self.assertEqual(enhanced.shape, stereo.T.shape)
+            self.assertTrue(np.isfinite(enhanced).all())
+            self.assertLessEqual(float(np.max(np.abs(enhanced))), 0.99 + 1e-6)
 if __name__ == "__main__":
     unittest.main()

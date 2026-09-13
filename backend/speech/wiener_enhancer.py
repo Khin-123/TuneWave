@@ -1,8 +1,14 @@
-"""Classical frequency-domain Wiener enhancement for noisy speech.
+"""Classical short-time spectral-subtraction enhancement for noisy speech.
 
-Mono speech is processed directly. Stereo speech retains separate channel
-spectra and uses a shared set of low-energy time frames for noise estimation,
-preserving channel count, spatial differences, sample rate, and duration.
+The production speech path is deliberately model-free:
+
+    framing -> Hann window -> FFT -> magnitude/phase -> low-energy noise
+    estimate -> spectral subtraction -> spectral floor -> mild Wiener
+    post-filter -> IFFT -> overlap-add -> level compensation
+
+Audio is processed one channel at a time. The shared STFT helpers provide the
+explicit FFT/IFFT and normalized overlap-add operations, while this module
+contains the speech-specific noise model and spectral processing.
 """
 
 from __future__ import annotations
@@ -17,28 +23,44 @@ import soundfile as sf
 
 try:
     from ..dsp.audio_utils import AudioLoadError, load_audio
-    from ..dsp.stft_utils import istft, magnitude, stft
+    from ..dsp.stft_utils import istft, magnitude, phase, stft
 except ImportError:
     from dsp.audio_utils import AudioLoadError, load_audio
-    from dsp.stft_utils import istft, magnitude, stft
+    from dsp.stft_utils import istft, magnitude, phase, stft
 
 
 @dataclass(frozen=True)
 class SpeechEnhancementConfig:
-    """Configuration for explainable short-time Wiener filtering."""
+    """Configuration for the classical speech enhancement pipeline.
+
+    ``noise_estimation='auto'`` is the final/default mode: frames are ranked
+    over the whole recording and the lowest-energy frames form the noise
+    model. ``'initial'`` remains accepted as a compatibility option for old
+    callers, but is not used by the default workflow.
+
+    ``min_gain``, ``noise_duration_seconds``, and the smoothing settings are
+    retained as compatibility fields for existing callers. The production
+    Wiener post-filter uses the explicitly named mild-Wiener settings below.
+    """
 
     frame_duration_ms: float = 25.0
     overlap_ratio: float = 0.75
+    beta: float = 1.5
+    spectral_floor: float = 0.08
     noise_estimation: str = "auto"
     noise_frame_percent: float = 0.15
     minimum_noise_frames: int = 8
     noise_duration_seconds: float = 0.5
     noise_percentile: float = 50.0
+    wiener_strength: float = 0.25
+    wiener_min_gain: float = 0.65
+    # Legacy public option retained for callers of the previous enhancer.
     min_gain: float = 0.10
     frequency_smoothing_bins: int = 3
     temporal_smoothing_frames: int = 3
     epsilon: float = 1e-10
     peak_limit: float = 0.99
+    max_compensation_gain: float = 1.5
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.frame_duration_ms) or not 5 <= self.frame_duration_ms <= 100:
@@ -47,6 +69,10 @@ class SpeechEnhancementConfig:
             raise ValueError("overlap_ratio must be in the interval [0, 1)")
         if self.noise_estimation not in {"auto", "initial"}:
             raise ValueError("noise_estimation must be 'auto' or 'initial'")
+        if not np.isfinite(self.beta) or self.beta < 0:
+            raise ValueError("beta must be a finite non-negative number")
+        if not np.isfinite(self.spectral_floor) or not 0 <= self.spectral_floor <= 1:
+            raise ValueError("spectral_floor must be in the interval [0, 1]")
         if not np.isfinite(self.noise_frame_percent) or not 0 < self.noise_frame_percent <= 1:
             raise ValueError("noise_frame_percent must be in the interval (0, 1]")
         if not isinstance(self.minimum_noise_frames, (int, np.integer)) or self.minimum_noise_frames < 1:
@@ -55,6 +81,10 @@ class SpeechEnhancementConfig:
             raise ValueError("noise_duration_seconds must be positive")
         if not np.isfinite(self.noise_percentile) or not 0 <= self.noise_percentile <= 100:
             raise ValueError("noise_percentile must be between 0 and 100")
+        if not np.isfinite(self.wiener_strength) or not 0 <= self.wiener_strength <= 1:
+            raise ValueError("wiener_strength must be in the interval [0, 1]")
+        if not np.isfinite(self.wiener_min_gain) or not 0 <= self.wiener_min_gain <= 1:
+            raise ValueError("wiener_min_gain must be in the interval [0, 1]")
         if not np.isfinite(self.min_gain) or not 0 <= self.min_gain <= 1:
             raise ValueError("min_gain must be in the interval [0, 1]")
         for name, value in (
@@ -67,6 +97,8 @@ class SpeechEnhancementConfig:
             raise ValueError("epsilon must be positive")
         if not np.isfinite(self.peak_limit) or not 0 < self.peak_limit <= 1:
             raise ValueError("peak_limit must be in the interval (0, 1]")
+        if not np.isfinite(self.max_compensation_gain) or self.max_compensation_gain < 1:
+            raise ValueError("max_compensation_gain must be at least 1")
 
 
 def speech_stft_parameters(
@@ -75,9 +107,8 @@ def speech_stft_parameters(
 ) -> tuple[int, int]:
     """Return sample-rate-aware frame and hop lengths.
 
-    The default is a 25 ms frame with 75% overlap. Unlike the music model's
-    fixed 4096-point transform, this keeps speech time resolution comparable
-    at common 8, 16, 44.1, and 48 kHz sample rates.
+    The default is a 25 ms frame with 75% overlap (a 5 ms hop). This keeps
+    analysis time resolution appropriate for speech at common sample rates.
     """
 
     if not isinstance(sample_rate, (int, np.integer)) or sample_rate <= 0:
@@ -106,24 +137,41 @@ def _validate_audio(audio: np.ndarray, sample_rate: int) -> tuple[np.ndarray, bo
     return np.ascontiguousarray(channel_first, dtype=np.float64), was_mono_vector
 
 
+def _validate_spectrum(complex_spectrum: np.ndarray) -> np.ndarray:
+    spectrum = np.asarray(complex_spectrum)
+    if spectrum.ndim != 2 or spectrum.shape[1] == 0:
+        raise ValueError("complex_spectrum must be a non-empty 2-D STFT")
+    if not np.isfinite(spectrum).all():
+        raise ValueError("complex_spectrum must contain finite values")
+    return spectrum
+
+
+def _validate_frame_indices(
+    complex_spectrum: np.ndarray,
+    frame_indices: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    spectrum = _validate_spectrum(complex_spectrum)
+    indices = np.asarray(frame_indices)
+    if indices.ndim != 1 or indices.size == 0 or not np.issubdtype(indices.dtype, np.integer):
+        raise ValueError("frame_indices must be a non-empty integer vector")
+    if np.any(indices < 0) or np.any(indices >= spectrum.shape[1]):
+        raise ValueError("frame_indices are outside the STFT")
+    return spectrum, indices.astype(np.int64, copy=False)
+
+
 def estimate_noise_power(
     complex_spectrum: np.ndarray,
     start_frame: int,
     stop_frame: int,
     percentile: float = 50.0,
 ) -> np.ndarray:
-    """Estimate noise power per frequency using an early-frame percentile.
+    """Estimate per-frequency noise power from a selected frame interval.
 
-    A low percentile is less influenced by brief speech energy than a simple
-    mean, but continuous speech or changing noise during the initial interval
-    can still make the estimate inaccurate.
+    This legacy interval helper remains available for API compatibility. The
+    enhancer itself uses selected low-energy frames from the full recording.
     """
 
-    spectrum = np.asarray(complex_spectrum)
-    if spectrum.ndim != 2 or spectrum.shape[1] == 0:
-        raise ValueError("complex_spectrum must be a non-empty 2-D STFT")
-    if not np.isfinite(spectrum).all():
-        raise ValueError("complex_spectrum must contain finite values")
+    spectrum = _validate_spectrum(complex_spectrum)
     if not isinstance(start_frame, (int, np.integer)) or not isinstance(
         stop_frame, (int, np.integer)
     ):
@@ -133,9 +181,30 @@ def estimate_noise_power(
     if not np.isfinite(percentile) or not 0 <= percentile <= 100:
         raise ValueError("percentile must be between 0 and 100")
 
-    initial_power = magnitude(spectrum[:, start_frame:stop_frame]) ** 2
-    noise_power = np.percentile(initial_power, percentile, axis=1, keepdims=True)
+    selected_magnitude = magnitude(spectrum[:, start_frame:stop_frame])
+    noise_power = np.percentile(selected_magnitude**2, percentile, axis=1, keepdims=True)
     return np.maximum(np.asarray(noise_power, dtype=np.float64), 0.0)
+
+
+def estimate_noise_magnitude_from_frames(
+    complex_spectrum: np.ndarray,
+    frame_indices: np.ndarray,
+    percentile: float = 50.0,
+) -> np.ndarray:
+    """Estimate noise magnitude per frequency from selected STFT frames."""
+
+    spectrum, indices = _validate_frame_indices(complex_spectrum, frame_indices)
+    if not np.isfinite(percentile) or not 0 <= percentile <= 100:
+        raise ValueError("percentile must be between 0 and 100")
+
+    selected_magnitude = magnitude(spectrum[:, indices])
+    noise_magnitude = np.percentile(
+        selected_magnitude,
+        percentile,
+        axis=1,
+        keepdims=True,
+    )
+    return np.maximum(np.asarray(noise_magnitude, dtype=np.float64), 0.0)
 
 
 def estimate_noise_power_from_frames(
@@ -143,24 +212,14 @@ def estimate_noise_power_from_frames(
     frame_indices: np.ndarray,
     percentile: float = 50.0,
 ) -> np.ndarray:
-    """Estimate per-frequency noise power from selected STFT frames."""
+    """Estimate noise power per frequency from selected STFT frames."""
 
-    spectrum = np.asarray(complex_spectrum)
-    indices = np.asarray(frame_indices)
-    if spectrum.ndim != 2 or spectrum.shape[1] == 0:
-        raise ValueError("complex_spectrum must be a non-empty 2-D STFT")
-    if not np.isfinite(spectrum).all():
-        raise ValueError("complex_spectrum must contain finite values")
-    if indices.ndim != 1 or indices.size == 0 or not np.issubdtype(indices.dtype, np.integer):
-        raise ValueError("frame_indices must be a non-empty integer vector")
-    if np.any(indices < 0) or np.any(indices >= spectrum.shape[1]):
-        raise ValueError("frame_indices are outside the STFT")
-    if not np.isfinite(percentile) or not 0 <= percentile <= 100:
-        raise ValueError("percentile must be between 0 and 100")
-
-    selected_power = magnitude(spectrum[:, indices]) ** 2
-    noise_power = np.percentile(selected_power, percentile, axis=1, keepdims=True)
-    return np.maximum(np.asarray(noise_power, dtype=np.float64), 0.0)
+    noise_magnitude = estimate_noise_magnitude_from_frames(
+        complex_spectrum,
+        frame_indices,
+        percentile=percentile,
+    )
+    return np.maximum(noise_magnitude**2, 0.0)
 
 
 def select_low_energy_noise_frames(
@@ -200,6 +259,67 @@ def select_low_energy_noise_frames(
     return np.sort(candidates[local_indices])
 
 
+def spectral_subtraction(
+    noisy_magnitude: np.ndarray,
+    estimated_noise_magnitude: np.ndarray,
+    *,
+    beta: float = 1.5,
+    spectral_floor: float = 0.08,
+) -> np.ndarray:
+    """Apply spectral subtraction with a relative magnitude floor.
+
+    The core rule is exactly::
+
+        max(noisy_magnitude - beta * estimated_noise_magnitude,
+            spectral_floor * noisy_magnitude)
+
+    ``estimated_noise_magnitude`` may be one column and will broadcast across
+    time frames.
+    """
+
+    noisy = np.asarray(noisy_magnitude, dtype=np.float64)
+    noise = np.asarray(estimated_noise_magnitude, dtype=np.float64)
+    if noisy.ndim != 2 or noisy.shape[1] == 0:
+        raise ValueError("noisy_magnitude must be a non-empty two-dimensional matrix")
+    if noise.ndim not in (1, 2):
+        raise ValueError("estimated_noise_magnitude must be one- or two-dimensional")
+    if noise.ndim == 1:
+        if noise.shape[0] != noisy.shape[0]:
+            raise ValueError("one-dimensional noise magnitude must match frequency bins")
+        noise = noise[:, np.newaxis]
+    if not np.isfinite(noisy).all() or not np.isfinite(noise).all():
+        raise ValueError("magnitude inputs must be finite")
+    if np.any(noisy < 0) or np.any(noise < 0):
+        raise ValueError("magnitude inputs must be non-negative")
+    if not np.isfinite(beta) or beta < 0:
+        raise ValueError("beta must be a finite non-negative number")
+    if not np.isfinite(spectral_floor) or not 0 <= spectral_floor <= 1:
+        raise ValueError("spectral_floor must be in the interval [0, 1]")
+
+    try:
+        subtracted = np.maximum(noisy - beta * noise, spectral_floor * noisy)
+    except ValueError as error:
+        raise ValueError("estimated_noise_magnitude is not broadcastable") from error
+    return np.nan_to_num(subtracted, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def spectral_subtract(
+    noisy_magnitude: np.ndarray,
+    estimated_noise_magnitude: np.ndarray,
+    *,
+    beta: float = 1.5,
+    spectral_floor: float = 0.08,
+) -> np.ndarray:
+    """Compatibility alias for :func:`spectral_subtraction`."""
+
+    return spectral_subtraction(
+        noisy_magnitude,
+        estimated_noise_magnitude,
+        beta=beta,
+        spectral_floor=spectral_floor,
+    )
+
+
 def compute_wiener_gain(
     noisy_power: np.ndarray,
     noise_power: np.ndarray,
@@ -207,11 +327,11 @@ def compute_wiener_gain(
     min_gain: float = 0.10,
     epsilon: float = 1e-10,
 ) -> np.ndarray:
-    """Return stable Wiener gains from noisy and estimated-noise power.
+    """Return stable bounded Wiener gains.
 
-    Estimated clean power is ``max(P_y - P_n, 0)`` and the gain is
-    ``P_clean / (P_clean + P_n + epsilon)``. A small gain floor reduces hard
-    spectral holes and musical-noise artifacts; gains can never exceed one.
+    This helper remains part of the previous public module interface. The
+    production pipeline uses it only for the mild post-filter after spectral
+    subtraction has already done the main denoising.
     """
 
     noisy = np.asarray(noisy_power, dtype=np.float64)
@@ -278,6 +398,58 @@ def smooth_wiener_gain(
     return np.clip(smoothed, min_gain, 1.0)
 
 
+def apply_mild_wiener_postfilter(
+    enhanced_spectrum: np.ndarray,
+    estimated_noise_magnitude: np.ndarray,
+    *,
+    strength: float = 0.25,
+    min_gain: float = 0.65,
+    frequency_bins: int = 3,
+    temporal_frames: int = 3,
+    epsilon: float = 1e-10,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply a deliberately mild Wiener residual-noise post-filter.
+
+    The Wiener estimate is calculated from the already-subtracted spectrum,
+    smoothed, floored, and blended only ``strength`` of the way from unity.
+    Thus spectral subtraction remains the main denoising operation and the
+    post-filter cannot create hard spectral holes.
+    """
+
+    spectrum = _validate_spectrum(enhanced_spectrum)
+    if not np.isfinite(strength) or not 0 <= strength <= 1:
+        raise ValueError("strength must be in the interval [0, 1]")
+    if not np.isfinite(min_gain) or not 0 <= min_gain <= 1:
+        raise ValueError("min_gain must be in the interval [0, 1]")
+    if not np.isfinite(epsilon) or epsilon <= 0:
+        raise ValueError("epsilon must be positive")
+
+    noise_magnitude = np.asarray(estimated_noise_magnitude, dtype=np.float64)
+    if noise_magnitude.ndim == 1:
+        noise_magnitude = noise_magnitude[:, np.newaxis]
+    if noise_magnitude.ndim != 2 or noise_magnitude.shape[0] != spectrum.shape[0]:
+        raise ValueError("estimated_noise_magnitude has incompatible frequency bins")
+    if not np.isfinite(noise_magnitude).all() or np.any(noise_magnitude < 0):
+        raise ValueError("estimated_noise_magnitude must be finite and non-negative")
+
+    residual_wiener_gain = compute_wiener_gain(
+        magnitude(spectrum) ** 2,
+        noise_magnitude**2,
+        min_gain=0.0,
+        epsilon=epsilon,
+    )
+    residual_wiener_gain = smooth_wiener_gain(
+        residual_wiener_gain,
+        frequency_bins=frequency_bins,
+        temporal_frames=temporal_frames,
+        min_gain=min_gain,
+    )
+    post_gain = 1.0 - strength * (1.0 - residual_wiener_gain)
+    filtered_magnitude = magnitude(spectrum) * post_gain
+    filtered_spectrum = filtered_magnitude * np.exp(1j * phase(spectrum))
+    return np.nan_to_num(filtered_spectrum), post_gain
+
+
 def _noise_frame_bounds(
     frame_count: int,
     sample_count: int,
@@ -286,13 +458,13 @@ def _noise_frame_bounds(
     hop_length: int,
     requested_seconds: float,
 ) -> tuple[int, int, float]:
+    """Return legacy initial-interval bounds for compatibility callers."""
+
     used_seconds = min(requested_seconds, sample_count / sample_rate)
     stop_frame = min(
         frame_count,
         max(1, int(np.floor(used_seconds * sample_rate / hop_length)) + 1),
     )
-    # Skip centered boundary frames when enough early audio exists, avoiding a
-    # downward noise bias from zero padding at the start of the recording.
     first_complete_frame = int(np.ceil((frame_length / 2) / hop_length))
     start_frame = first_complete_frame if stop_frame > first_complete_frame else 0
     if stop_frame <= start_frame:
@@ -300,17 +472,65 @@ def _noise_frame_bounds(
     return start_frame, stop_frame, used_seconds
 
 
+def _select_noise_frames(
+    spectra: list[np.ndarray],
+    noisy_powers: list[np.ndarray],
+    sample_count: int,
+    sample_rate: int,
+    frame_length: int,
+    hop_length: int,
+    config: SpeechEnhancementConfig,
+) -> tuple[np.ndarray, float | None]:
+    """Select low-energy frames, ranking the complete recording by default."""
+
+    frame_count = int(spectra[0].shape[1])
+    if config.noise_estimation == "initial":
+        start_frame, stop_frame, duration_used = _noise_frame_bounds(
+            frame_count,
+            sample_count,
+            sample_rate,
+            frame_length,
+            hop_length,
+            config.noise_duration_seconds,
+        )
+        return np.arange(start_frame, stop_frame, dtype=np.int64), duration_used
+
+    # The mean spectral power is proportional to windowed frame energy.
+    # Channels are combined only for ranking; each channel gets its own noise
+    # spectrum below so stereo spatial differences are preserved.
+    combined_frame_energy = np.mean(np.stack(noisy_powers, axis=0), axis=(0, 1))
+    boundary_frames = int(np.ceil((frame_length / 2) / hop_length))
+    candidate_start = min(boundary_frames, frame_count)
+    candidate_stop = max(candidate_start, frame_count - boundary_frames)
+    complete_frames = np.arange(candidate_start, candidate_stop, dtype=np.int64)
+    if complete_frames.size == 0:
+        complete_frames = np.arange(frame_count, dtype=np.int64)
+    selected = select_low_energy_noise_frames(
+        combined_frame_energy,
+        frame_percent=config.noise_frame_percent,
+        minimum_frames=config.minimum_noise_frames,
+        candidate_indices=complete_frames,
+    )
+    return selected, None
+
+
+def _rms(values: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(np.square(values, dtype=np.float64))))
+
+
 def enhance_audio(
     audio: np.ndarray,
     sample_rate: int,
     config: SpeechEnhancementConfig | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Enhance mono or channel-first stereo speech with classical Wiener DSP."""
+    """Enhance mono or channel-first stereo speech with classical DSP."""
 
     used_config = config or SpeechEnhancementConfig()
     channels, was_mono_vector = _validate_audio(audio, sample_rate)
     frame_length, hop_length = speech_stft_parameters(sample_rate, used_config)
     started = perf_counter()
+
+    # stft performs framing, Hann analysis-windowing, and an explicit rFFT.
     spectra = [
         stft(
             channel,
@@ -320,128 +540,170 @@ def enhance_audio(
         )
         for channel in channels
     ]
-    noisy_powers = [magnitude(spectrum) ** 2 for spectrum in spectra]
+    noisy_magnitudes = [magnitude(spectrum) for spectrum in spectra]
+    noisy_powers = [spectrum_magnitude**2 for spectrum_magnitude in noisy_magnitudes]
     frame_count = int(spectra[0].shape[1])
-
-    noise_duration_used: float | None = None
-    if used_config.noise_estimation == "auto":
-        # The mean spectral power is proportional to the Hann-windowed frame
-        # energy. Stereo channels are combined only for frame ranking; their
-        # spectra and per-frequency noise estimates remain separate.
-        combined_frame_energy = np.mean(
-            np.stack(noisy_powers, axis=0),
-            axis=(0, 1),
-        )
-        boundary_frames = int(np.ceil((frame_length / 2) / hop_length))
-        candidate_start = min(boundary_frames, frame_count)
-        candidate_stop = max(candidate_start, frame_count - boundary_frames)
-        complete_frames = np.arange(candidate_start, candidate_stop, dtype=np.int64)
-        if complete_frames.size == 0:
-            complete_frames = np.arange(frame_count, dtype=np.int64)
-        noise_frame_indices = select_low_energy_noise_frames(
-            combined_frame_energy,
-            frame_percent=used_config.noise_frame_percent,
-            minimum_frames=used_config.minimum_noise_frames,
-            candidate_indices=complete_frames,
-        )
-    else:
-        start_frame, stop_frame, noise_duration_used = _noise_frame_bounds(
-            frame_count,
-            channels.shape[1],
-            sample_rate,
-            frame_length,
-            hop_length,
-            used_config.noise_duration_seconds,
-        )
-        noise_frame_indices = np.arange(start_frame, stop_frame, dtype=np.int64)
+    noise_frame_indices, noise_duration_used = _select_noise_frames(
+        spectra,
+        noisy_powers,
+        channels.shape[1],
+        sample_rate,
+        frame_length,
+        hop_length,
+        used_config,
+    )
 
     reconstructed_channels: list[np.ndarray] = []
-    gain_minimum = 1.0
-    gain_maximum = 0.0
-    gain_sum = 0.0
-    gain_value_count = 0
-    attenuated_over_3_db = 0
-    attenuated_over_6_db = 0
+    post_gain_minimum = 1.0
+    post_gain_maximum = 0.0
+    post_gain_sum = 0.0
+    post_gain_value_count = 0
+    post_gain_attenuated_over_3_db = 0
+    post_gain_attenuated_over_6_db = 0
+    subtraction_floor_bins = 0
+    subtraction_attenuated_bins = 0
 
-    for complex_spectrum, noisy_power in zip(spectra, noisy_powers):
-        noise_power = estimate_noise_power_from_frames(
+    for complex_spectrum, noisy_magnitude in zip(spectra, noisy_magnitudes):
+        noise_magnitude = estimate_noise_magnitude_from_frames(
             complex_spectrum,
             noise_frame_indices,
             percentile=used_config.noise_percentile,
         )
-        gain = compute_wiener_gain(
-            noisy_power,
-            noise_power,
-            min_gain=used_config.min_gain,
-            epsilon=used_config.epsilon,
+
+        # Spectral subtraction is the main denoising operation. Noisy phase is
+        # retained explicitly when rebuilding the complex spectrum.
+        subtracted_magnitude = spectral_subtraction(
+            noisy_magnitude,
+            noise_magnitude,
+            beta=used_config.beta,
+            spectral_floor=used_config.spectral_floor,
         )
-        gain = smooth_wiener_gain(
-            gain,
+        subtraction_floor_bins += int(
+            np.count_nonzero(
+                subtracted_magnitude
+                <= used_config.spectral_floor * noisy_magnitude + used_config.epsilon
+            )
+        )
+        subtraction_attenuated_bins += int(
+            np.count_nonzero(subtracted_magnitude < noisy_magnitude)
+        )
+        subtracted_spectrum = subtracted_magnitude * np.exp(1j * phase(complex_spectrum))
+
+        # The Wiener stage is intentionally mild and occurs only after
+        # subtraction. It retains the same noisy phase as the spectrum above.
+        filtered_spectrum, post_gain = apply_mild_wiener_postfilter(
+            subtracted_spectrum,
+            noise_magnitude,
+            strength=used_config.wiener_strength,
+            min_gain=used_config.wiener_min_gain,
             frequency_bins=used_config.frequency_smoothing_bins,
             temporal_frames=used_config.temporal_smoothing_frames,
-            min_gain=used_config.min_gain,
+            epsilon=used_config.epsilon,
         )
-        gain_minimum = min(gain_minimum, float(np.min(gain)))
-        gain_maximum = max(gain_maximum, float(np.max(gain)))
-        gain_sum += float(np.sum(gain))
-        gain_value_count += int(gain.size)
-        attenuated_over_3_db += int(np.count_nonzero(gain < 10 ** (-3.0 / 20.0)))
-        attenuated_over_6_db += int(np.count_nonzero(gain < 10 ** (-6.0 / 20.0)))
-        enhanced_spectrum = gain * complex_spectrum
-        reconstructed = istft(
-            enhanced_spectrum,
-            sample_rate,
-            n_fft=frame_length,
-            hop_length=hop_length,
-            length=channels.shape[1],
+        post_gain_minimum = min(post_gain_minimum, float(np.min(post_gain)))
+        post_gain_maximum = max(post_gain_maximum, float(np.max(post_gain)))
+        post_gain_sum += float(np.sum(post_gain))
+        post_gain_value_count += int(post_gain.size)
+        post_gain_attenuated_over_3_db += int(np.count_nonzero(post_gain < 10 ** (-3.0 / 20.0)))
+        post_gain_attenuated_over_6_db += int(np.count_nonzero(post_gain < 10 ** (-6.0 / 20.0)))
+
+        # istft performs the explicit IFFT and Hann-windowed overlap-add,
+        # trimming centered analysis padding to the original duration.
+        reconstructed_channels.append(
+            istft(
+                filtered_spectrum,
+                sample_rate,
+                n_fft=frame_length,
+                hop_length=hop_length,
+                length=channels.shape[1],
+            )
         )
-        reconstructed_channels.append(reconstructed)
 
     enhanced = np.stack(reconstructed_channels, axis=0)
-    input_peak = float(np.max(np.abs(channels)))
+    input_rms = _rms(channels)
+    output_rms_before_compensation = _rms(enhanced)
+
+    # Raise a quieter enhanced signal toward the input level, but cap the
+    # boost so a poor estimate cannot produce an unexpectedly loud result.
+    compensation_gain = 1.0
+    if input_rms > used_config.epsilon and output_rms_before_compensation > used_config.epsilon:
+        if output_rms_before_compensation < input_rms:
+            compensation_gain = min(
+                input_rms / output_rms_before_compensation,
+                used_config.max_compensation_gain,
+            )
+    enhanced *= compensation_gain
+
+    # Shared scaling preserves stereo balance and prevents clipping.
     pre_limit_output_peak = float(np.max(np.abs(enhanced)))
     shared_gain = 1.0
     if pre_limit_output_peak > used_config.peak_limit:
         shared_gain = used_config.peak_limit / pre_limit_output_peak
         enhanced *= shared_gain
+    enhanced = np.nan_to_num(enhanced, nan=0.0, posinf=0.0, neginf=0.0)
+    enhanced = np.clip(enhanced, -used_config.peak_limit, used_config.peak_limit)
+    output_rms_after_compensation = _rms(enhanced)
     output_peak = float(np.max(np.abs(enhanced)))
     if not np.isfinite(enhanced).all():
         raise RuntimeError("speech enhancement produced non-finite samples")
 
     noise_frame_count = int(noise_frame_indices.size)
-    mean_wiener_gain = gain_sum / gain_value_count
-    input_rms = float(np.sqrt(np.mean(channels**2)))
-    output_rms = float(np.sqrt(np.mean(enhanced**2)))
-
+    mean_post_gain = post_gain_sum / max(post_gain_value_count, 1)
+    total_bins = max(post_gain_value_count, 1)
+    processing_time = perf_counter() - started
     diagnostics: dict[str, Any] = {
+        # Required diagnostics.
         "sample_rate": int(sample_rate),
+        "duration": channels.shape[1] / sample_rate,
+        "frame_size": int(frame_length),
+        "hop_size": int(hop_length),
+        "number_of_frames": frame_count,
+        "noise_frames_selected": noise_frame_count,
+        "beta": float(used_config.beta),
+        "spectral_floor": float(used_config.spectral_floor),
+        "input_rms": input_rms,
+        "output_rms_before_compensation": output_rms_before_compensation,
+        "output_rms_after_compensation": output_rms_after_compensation,
+        "processing_time": processing_time,
+        # Compatibility and useful detail diagnostics.
         "channels": int(channels.shape[0]),
         "samples": int(channels.shape[1]),
         "duration_seconds": channels.shape[1] / sample_rate,
-        "stft_size": int(frame_length),
-        "hop_length": int(hop_length),
-        "overlap_ratio": float(used_config.overlap_ratio),
-        "frames": frame_count,
         "noise_estimation": used_config.noise_estimation,
+        "noise_estimation_method": (
+            "low_energy_frames"
+            if used_config.noise_estimation == "auto"
+            else "legacy_initial_interval"
+        ),
         "noise_frames": noise_frame_count,
         "noise_frame_percent": float(used_config.noise_frame_percent),
-        "noise_frames_percent": 100.0 * noise_frame_count / frame_count,
+        "noise_frames_percent": 100.0 * noise_frame_count / max(frame_count, 1),
         "noise_estimation_duration_seconds": noise_duration_used,
         "noise_percentile": float(used_config.noise_percentile),
-        "wiener_gain_min": gain_minimum,
-        "wiener_gain_max": gain_maximum,
-        "mean_wiener_gain": mean_wiener_gain,
-        "bins_attenuated_over_3_db_percent": 100.0 * attenuated_over_3_db / gain_value_count,
-        "bins_attenuated_over_6_db_percent": 100.0 * attenuated_over_6_db / gain_value_count,
+        "wiener_strength": float(used_config.wiener_strength),
+        "wiener_min_gain": float(used_config.wiener_min_gain),
+        "wiener_gain_min": post_gain_minimum,
+        "wiener_gain_max": post_gain_maximum,
+        "mean_wiener_gain": mean_post_gain,
+        "subtraction_floor_bins_percent": 100.0 * subtraction_floor_bins / total_bins,
+        "subtraction_attenuated_bins_percent": 100.0 * subtraction_attenuated_bins / total_bins,
+        "bins_attenuated_over_3_db_percent": 100.0 * post_gain_attenuated_over_3_db / total_bins,
+        "bins_attenuated_over_6_db_percent": 100.0 * post_gain_attenuated_over_6_db / total_bins,
         "frequency_smoothing_bins": int(used_config.frequency_smoothing_bins),
         "temporal_smoothing_frames": int(used_config.temporal_smoothing_frames),
-        "input_rms": input_rms,
-        "output_rms": output_rms,
-        "input_peak": input_peak,
+        "output_rms": output_rms_after_compensation,
+        "input_peak": float(np.max(np.abs(channels))),
         "pre_limit_output_peak": pre_limit_output_peak,
         "output_peak": output_peak,
+        "compensation_gain": compensation_gain,
+        "output_level_compensation_gain": compensation_gain,
         "shared_output_gain": shared_gain,
-        "processing_seconds": perf_counter() - started,
+        "frame_duration_ms": float(used_config.frame_duration_ms),
+        "overlap_ratio": float(used_config.overlap_ratio),
+        "stft_size": int(frame_length),
+        "hop_length": int(hop_length),
+        "frames": frame_count,
+        "processing_seconds": processing_time,
     }
     result = np.asarray(enhanced, dtype=np.float32)
     if was_mono_vector:
