@@ -2,6 +2,8 @@
 
 from .wiener_enhancer import (
     SpeechEnhancementConfig,
+    adaptive_subtraction_factor,
+    compute_snr_db,
     apply_mild_wiener_postfilter,
     compute_wiener_gain,
     enhance_audio,
@@ -18,6 +20,8 @@ from .wiener_enhancer import (
 
 __all__ = [
     "SpeechEnhancementConfig",
+    "adaptive_subtraction_factor",
+    "compute_snr_db",
     "apply_mild_wiener_postfilter",
     "compute_wiener_gain",
     "enhance_audio",

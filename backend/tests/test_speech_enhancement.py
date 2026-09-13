@@ -8,6 +8,8 @@ import soundfile as sf
 from dsp.stft_utils import istft, stft
 from speech.wiener_enhancer import (
     SpeechEnhancementConfig,
+    adaptive_subtraction_factor,
+    compute_snr_db,
     compute_wiener_gain,
     enhance_audio,
     enhance_audio_file,
@@ -301,5 +303,69 @@ class SpeechEnhancementTestCase(unittest.TestCase):
             self.assertEqual(enhanced.shape, stereo.T.shape)
             self.assertTrue(np.isfinite(enhanced).all())
             self.assertLessEqual(float(np.max(np.abs(enhanced))), 0.99 + 1e-6)
+    def test_adaptive_beta_is_stronger_in_noise_and_weaker_in_speech(self):
+        local_snr_db = np.array([-10.0, 0.0, 7.5, 15.0, 30.0])
+        beta = adaptive_subtraction_factor(local_snr_db)
+        self.assertTrue(np.isfinite(beta).all())
+        self.assertGreaterEqual(float(np.min(beta)), 0.8)
+        self.assertLessEqual(float(np.max(beta)), 1.8)
+        self.assertGreater(beta[0], beta[-1])
+        self.assertGreater(beta[1], beta[3])
+        np.testing.assert_allclose(beta[[0, 1, 3, 4]], [1.8, 1.8, 0.8, 0.8])
+
+    def test_adaptive_diagnostics_include_snr_beta_and_noise_tracking(self):
+        sample_rate = 16_000
+        clean, noisy, _ = self.synthetic_speech(sample_rate, duration=1.0)
+        _, diagnostics = enhance_audio(noisy, sample_rate, reference_audio=clean)
+        for key in (
+            "mean_local_snr",
+            "beta_min",
+            "beta_mean",
+            "beta_max",
+            "spectral_floor",
+            "input_rms",
+            "output_rms_after_compensation",
+            "processing_time",
+            "synthetic_input_snr",
+            "synthetic_output_snr",
+            "snr_improvement",
+        ):
+            self.assertIsNotNone(diagnostics[key])
+            self.assertTrue(np.isfinite(diagnostics[key]))
+        self.assertGreaterEqual(diagnostics["beta_min"], 0.8)
+        self.assertLessEqual(diagnostics["beta_max"], 1.8)
+        self.assertGreater(diagnostics["beta_max"], diagnostics["beta_min"])
+        self.assertGreater(diagnostics["number_of_noise_dominant_frames"], 0)
+        self.assertGreater(diagnostics["snr_improvement"], 0.0)
+        self.assertAlmostEqual(
+            diagnostics["synthetic_input_snr"],
+            compute_snr_db(clean, noisy),
+            places=6,
+        )
+
+    def test_adaptive_beats_fixed_beta_on_same_synthetic_input(self):
+        sample_rate = 16_000
+        clean, noisy, _ = self.synthetic_speech(sample_rate, duration=1.0)
+        fixed, fixed_diagnostics = enhance_audio(
+            noisy,
+            sample_rate,
+            SpeechEnhancementConfig(
+                beta=1.5,
+                adaptive_beta=False,
+                noise_tracking_alpha=0.0,
+            ),
+            reference_audio=clean,
+        )
+        adaptive, adaptive_diagnostics = enhance_audio(
+            noisy,
+            sample_rate,
+            reference_audio=clean,
+        )
+        self.assertEqual(fixed.shape, adaptive.shape)
+        self.assertGreater(
+            adaptive_diagnostics["synthetic_output_snr"],
+            fixed_diagnostics["synthetic_output_snr"] + 0.1,
+        )
+        self.assertLess(adaptive_diagnostics["beta_min"], adaptive_diagnostics["beta_max"])
 if __name__ == "__main__":
     unittest.main()

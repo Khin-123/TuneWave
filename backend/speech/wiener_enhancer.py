@@ -61,6 +61,16 @@ class SpeechEnhancementConfig:
     epsilon: float = 1e-10
     peak_limit: float = 0.99
     max_compensation_gain: float = 1.5
+    # Adaptive processing controls appended for positional compatibility.
+    adaptive_beta: bool = True
+    beta_min: float = 0.8
+    beta_max: float = 1.8
+    beta_adaptation_strength: float = 0.5
+    beta_low_snr_db: float = 0.0
+    beta_high_snr_db: float = 15.0
+    noise_tracking_alpha: float = 0.04
+    noise_tracking_snr_db: float = 3.0
+    noise_tracking_energy_percentile: float = 40.0
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.frame_duration_ms) or not 5 <= self.frame_duration_ms <= 100:
@@ -99,6 +109,24 @@ class SpeechEnhancementConfig:
             raise ValueError("peak_limit must be in the interval (0, 1]")
         if not np.isfinite(self.max_compensation_gain) or self.max_compensation_gain < 1:
             raise ValueError("max_compensation_gain must be at least 1")
+        if not isinstance(self.adaptive_beta, (bool, np.bool_)):
+            raise ValueError("adaptive_beta must be boolean")
+        if not np.isfinite(self.beta_min) or not 0.0 <= self.beta_min <= 1.8:
+            raise ValueError("beta_min must be in the interval [0, 1.8]")
+        if not np.isfinite(self.beta_max) or not self.beta_min <= self.beta_max <= 1.8:
+            raise ValueError("beta_max must be >= beta_min and at most 1.8")
+        if not np.isfinite(self.beta) or not self.beta_min <= self.beta <= self.beta_max:
+            raise ValueError("beta must remain within beta_min and beta_max")
+        if not np.isfinite(self.beta_adaptation_strength) or not 0 <= self.beta_adaptation_strength <= 1:
+            raise ValueError("beta_adaptation_strength must be in the interval [0, 1]")
+        if not np.isfinite(self.beta_low_snr_db) or not np.isfinite(self.beta_high_snr_db) or self.beta_high_snr_db <= self.beta_low_snr_db:
+            raise ValueError("beta SNR bounds must be finite and ordered")
+        if not np.isfinite(self.noise_tracking_alpha) or not 0 <= self.noise_tracking_alpha <= 1:
+            raise ValueError("noise_tracking_alpha must be in the interval [0, 1]")
+        if not np.isfinite(self.noise_tracking_snr_db):
+            raise ValueError("noise_tracking_snr_db must be finite")
+        if not np.isfinite(self.noise_tracking_energy_percentile) or not 0 < self.noise_tracking_energy_percentile <= 100:
+            raise ValueError("noise_tracking_energy_percentile must be in the interval (0, 100]")
 
 
 def speech_stft_parameters(
@@ -259,11 +287,67 @@ def select_low_energy_noise_frames(
     return np.sort(candidates[local_indices])
 
 
+def adaptive_subtraction_factor(
+    local_snr_db: np.ndarray,
+    *,
+    beta: float = 1.3,
+    beta_min: float = 0.8,
+    beta_max: float = 1.8,
+    adaptation_strength: float = 0.5,
+    low_snr_db: float = 0.0,
+    high_snr_db: float = 15.0,
+) -> np.ndarray:
+    """Map local SNR to bounded beta: stronger in noise, weaker in speech."""
+
+    snr = np.asarray(local_snr_db, dtype=np.float64)
+    if snr.ndim == 0 or not np.isfinite(snr).all():
+        raise ValueError("local_snr_db must be a finite non-scalar array")
+    if not np.isfinite(beta_min) or not np.isfinite(beta_max) or not beta_min <= beta_max:
+        raise ValueError("beta bounds must be finite and ordered")
+    if not np.isfinite(beta) or not beta_min <= beta <= beta_max:
+        raise ValueError("beta must be within beta_min and beta_max")
+    if not np.isfinite(adaptation_strength) or not 0 <= adaptation_strength <= 1:
+        raise ValueError("adaptation_strength must be in the interval [0, 1]")
+    if not np.isfinite(low_snr_db) or not np.isfinite(high_snr_db) or high_snr_db <= low_snr_db:
+        raise ValueError("SNR bounds must be finite and ordered")
+
+    speech_weight = np.clip(
+        (snr - low_snr_db) / (high_snr_db - low_snr_db),
+        0.0,
+        1.0,
+    )
+    low_snr_beta = np.clip(beta + adaptation_strength, beta_min, beta_max)
+    high_snr_beta = np.clip(beta - adaptation_strength, beta_min, beta_max)
+    result = low_snr_beta * (1.0 - speech_weight) + high_snr_beta * speech_weight
+    return np.clip(np.nan_to_num(result), beta_min, beta_max)
+
+
+def compute_snr_db(
+    reference: np.ndarray,
+    estimate: np.ndarray,
+    *,
+    epsilon: float = 1e-10,
+) -> float:
+    """Return finite global SNR in dB for a reference and estimate."""
+
+    reference_values = np.asarray(reference, dtype=np.float64)
+    estimate_values = np.asarray(estimate, dtype=np.float64)
+    if reference_values.shape != estimate_values.shape:
+        raise ValueError("reference and estimate must have the same shape")
+    if reference_values.size == 0 or not np.isfinite(reference_values).all() or not np.isfinite(estimate_values).all():
+        raise ValueError("reference and estimate must be finite and non-empty")
+    if not np.isfinite(epsilon) or epsilon <= 0:
+        raise ValueError("epsilon must be positive")
+
+    reference_power = float(np.mean(reference_values**2))
+    error_power = float(np.mean((estimate_values - reference_values) ** 2))
+    return float(10.0 * np.log10(max(reference_power, epsilon) / max(error_power, epsilon)))
+
 def spectral_subtraction(
     noisy_magnitude: np.ndarray,
     estimated_noise_magnitude: np.ndarray,
     *,
-    beta: float = 1.5,
+    beta: float | np.ndarray = 1.5,
     spectral_floor: float = 0.08,
 ) -> np.ndarray:
     """Apply spectral subtraction with a relative magnitude floor.
@@ -279,6 +363,7 @@ def spectral_subtraction(
 
     noisy = np.asarray(noisy_magnitude, dtype=np.float64)
     noise = np.asarray(estimated_noise_magnitude, dtype=np.float64)
+    beta_values = np.asarray(beta, dtype=np.float64)
     if noisy.ndim != 2 or noisy.shape[1] == 0:
         raise ValueError("noisy_magnitude must be a non-empty two-dimensional matrix")
     if noise.ndim not in (1, 2):
@@ -287,17 +372,17 @@ def spectral_subtraction(
         if noise.shape[0] != noisy.shape[0]:
             raise ValueError("one-dimensional noise magnitude must match frequency bins")
         noise = noise[:, np.newaxis]
-    if not np.isfinite(noisy).all() or not np.isfinite(noise).all():
-        raise ValueError("magnitude inputs must be finite")
-    if np.any(noisy < 0) or np.any(noise < 0):
-        raise ValueError("magnitude inputs must be non-negative")
-    if not np.isfinite(beta) or beta < 0:
-        raise ValueError("beta must be a finite non-negative number")
+    if beta_values.ndim > 2:
+        raise ValueError("beta must be scalar, one-dimensional, or two-dimensional")
+    if not np.isfinite(noisy).all() or not np.isfinite(noise).all() or not np.isfinite(beta_values).all():
+        raise ValueError("magnitude and beta inputs must be finite")
+    if np.any(noisy < 0) or np.any(noise < 0) or np.any(beta_values < 0):
+        raise ValueError("magnitude and beta inputs must be non-negative")
     if not np.isfinite(spectral_floor) or not 0 <= spectral_floor <= 1:
         raise ValueError("spectral_floor must be in the interval [0, 1]")
 
     try:
-        subtracted = np.maximum(noisy - beta * noise, spectral_floor * noisy)
+        subtracted = np.maximum(noisy - beta_values * noise, spectral_floor * noisy)
     except ValueError as error:
         raise ValueError("estimated_noise_magnitude is not broadcastable") from error
     return np.nan_to_num(subtracted, nan=0.0, posinf=0.0, neginf=0.0)
@@ -307,7 +392,7 @@ def spectral_subtract(
     noisy_magnitude: np.ndarray,
     estimated_noise_magnitude: np.ndarray,
     *,
-    beta: float = 1.5,
+    beta: float | np.ndarray = 1.5,
     spectral_floor: float = 0.08,
 ) -> np.ndarray:
     """Compatibility alias for :func:`spectral_subtraction`."""
@@ -514,6 +599,55 @@ def _select_noise_frames(
     return selected, None
 
 
+def _track_noise_powers(
+    noisy_powers: list[np.ndarray],
+    initial_noise_powers: list[np.ndarray],
+    config: SpeechEnhancementConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Track noise only on low-energy frames likely dominated by noise."""
+
+    observed = np.stack(noisy_powers, axis=0)
+    _, _, frame_count = observed.shape
+    tracked = np.stack(
+        [np.asarray(noise_power[:, 0], dtype=np.float64) for noise_power in initial_noise_powers],
+        axis=0,
+    )
+    tracked = np.maximum(tracked, 0.0)
+    tracks = np.empty_like(observed, dtype=np.float64)
+    local_snr_db = np.empty_like(observed, dtype=np.float64)
+    posterior_snr_db = np.empty_like(observed, dtype=np.float64)
+    frame_energy = np.mean(observed, axis=(0, 1))
+    energy_limit = float(np.percentile(frame_energy, config.noise_tracking_energy_percentile))
+    noise_dominant_frames = np.zeros(frame_count, dtype=bool)
+
+    for frame_index in range(frame_count):
+        current_noise = np.maximum(tracked, 0.0)
+        observed_frame = observed[:, :, frame_index]
+        denominator = current_noise + config.epsilon
+        gamma = observed_frame / denominator
+        posterior_snr = np.maximum(observed_frame - current_noise, 0.0) / denominator
+        local_snr_db[:, :, frame_index] = 10.0 * np.log10(np.maximum(gamma, config.epsilon))
+        posterior_snr_db[:, :, frame_index] = 10.0 * np.log10(
+            np.maximum(posterior_snr, config.epsilon)
+        )
+        tracks[:, :, frame_index] = current_noise
+        frame_snr_db = 10.0 * np.log10(
+            max(float(np.mean(observed_frame)), config.epsilon)
+            / max(float(np.mean(current_noise)), config.epsilon)
+        )
+        is_noise_dominant = (
+            frame_snr_db <= config.noise_tracking_snr_db
+            and frame_energy[frame_index] <= energy_limit
+        )
+        noise_dominant_frames[frame_index] = is_noise_dominant
+        if is_noise_dominant and config.noise_tracking_alpha > 0:
+            tracked = (
+                (1.0 - config.noise_tracking_alpha) * current_noise
+                + config.noise_tracking_alpha * observed_frame
+            )
+
+    return tracks, local_snr_db, posterior_snr_db, noise_dominant_frames
+
 def _rms(values: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(values, dtype=np.float64))))
 
@@ -522,11 +656,17 @@ def enhance_audio(
     audio: np.ndarray,
     sample_rate: int,
     config: SpeechEnhancementConfig | None = None,
+    reference_audio: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Enhance mono or channel-first stereo speech with classical DSP."""
 
     used_config = config or SpeechEnhancementConfig()
     channels, was_mono_vector = _validate_audio(audio, sample_rate)
+    reference_channels: np.ndarray | None = None
+    if reference_audio is not None:
+        reference_channels, _ = _validate_audio(reference_audio, sample_rate)
+        if reference_channels.shape != channels.shape:
+            raise ValueError("reference_audio must match audio dimensions")
     frame_length, hop_length = speech_stft_parameters(sample_rate, used_config)
     started = perf_counter()
 
@@ -553,6 +693,31 @@ def enhance_audio(
         used_config,
     )
 
+    initial_noise_powers = [
+        estimate_noise_power_from_frames(
+            spectrum,
+            noise_frame_indices,
+            percentile=used_config.noise_percentile,
+        )
+        for spectrum in spectra
+    ]
+    noise_power_tracks, local_snr_db, posterior_snr_db, noise_dominant_frames = _track_noise_powers(
+        noisy_powers,
+        initial_noise_powers,
+        used_config,
+    )
+    if used_config.adaptive_beta:
+        adaptive_betas = adaptive_subtraction_factor(
+            local_snr_db,
+            beta=used_config.beta,
+            beta_min=used_config.beta_min,
+            beta_max=used_config.beta_max,
+            adaptation_strength=used_config.beta_adaptation_strength,
+            low_snr_db=used_config.beta_low_snr_db,
+            high_snr_db=used_config.beta_high_snr_db,
+        )
+    else:
+        adaptive_betas = np.full_like(local_snr_db, used_config.beta, dtype=np.float64)
     reconstructed_channels: list[np.ndarray] = []
     post_gain_minimum = 1.0
     post_gain_maximum = 0.0
@@ -563,19 +728,16 @@ def enhance_audio(
     subtraction_floor_bins = 0
     subtraction_attenuated_bins = 0
 
-    for complex_spectrum, noisy_magnitude in zip(spectra, noisy_magnitudes):
-        noise_magnitude = estimate_noise_magnitude_from_frames(
-            complex_spectrum,
-            noise_frame_indices,
-            percentile=used_config.noise_percentile,
-        )
+    for channel_index, (complex_spectrum, noisy_magnitude) in enumerate(zip(spectra, noisy_magnitudes)):
+        # Use the conservative per-frame track, not one static noise spectrum.
+        noise_magnitude = np.sqrt(np.maximum(noise_power_tracks[channel_index], 0.0))
 
         # Spectral subtraction is the main denoising operation. Noisy phase is
         # retained explicitly when rebuilding the complex spectrum.
         subtracted_magnitude = spectral_subtraction(
             noisy_magnitude,
             noise_magnitude,
-            beta=used_config.beta,
+            beta=adaptive_betas[channel_index],
             spectral_floor=used_config.spectral_floor,
         )
         subtraction_floor_bins += int(
@@ -647,6 +809,13 @@ def enhance_audio(
     if not np.isfinite(enhanced).all():
         raise RuntimeError("speech enhancement produced non-finite samples")
 
+    synthetic_input_snr: float | None = None
+    synthetic_output_snr: float | None = None
+    snr_improvement: float | None = None
+    if reference_channels is not None:
+        synthetic_input_snr = compute_snr_db(reference_channels, channels, epsilon=used_config.epsilon)
+        synthetic_output_snr = compute_snr_db(reference_channels, enhanced, epsilon=used_config.epsilon)
+        snr_improvement = synthetic_output_snr - synthetic_input_snr
     noise_frame_count = int(noise_frame_indices.size)
     mean_post_gain = post_gain_sum / max(post_gain_value_count, 1)
     total_bins = max(post_gain_value_count, 1)
@@ -659,11 +828,24 @@ def enhance_audio(
         "hop_size": int(hop_length),
         "number_of_frames": frame_count,
         "noise_frames_selected": noise_frame_count,
+        "mean_local_snr": float(np.mean(local_snr_db)),
+        "mean_local_snr_db": float(np.mean(local_snr_db)),
+        "mean_posterior_snr_db": float(np.mean(posterior_snr_db)),
+        "beta_min": float(np.min(adaptive_betas)),
+        "beta_mean": float(np.mean(adaptive_betas)),
+        "beta_max": float(np.max(adaptive_betas)),
+        "number_of_noise_dominant_frames": int(np.count_nonzero(noise_dominant_frames)),
         "beta": float(used_config.beta),
         "spectral_floor": float(used_config.spectral_floor),
         "input_rms": input_rms,
         "output_rms_before_compensation": output_rms_before_compensation,
         "output_rms_after_compensation": output_rms_after_compensation,
+        "synthetic_input_snr": synthetic_input_snr,
+        "synthetic_output_snr": synthetic_output_snr,
+        "snr_improvement": snr_improvement,
+        "synthetic_input_snr_db": synthetic_input_snr,
+        "synthetic_output_snr_db": synthetic_output_snr,
+        "snr_improvement_db": snr_improvement,
         "processing_time": processing_time,
         # Compatibility and useful detail diagnostics.
         "channels": int(channels.shape[0]),
@@ -673,8 +855,16 @@ def enhance_audio(
         "noise_estimation_method": (
             "low_energy_frames"
             if used_config.noise_estimation == "auto"
-            else "legacy_initial_interval"
+            else "legacy_initial_interval_with_tracking"
         ),
+        "noise_dominant_frames": int(np.count_nonzero(noise_dominant_frames)),
+        "noise_tracking_alpha": float(used_config.noise_tracking_alpha),
+        "noise_tracking_snr_db": float(used_config.noise_tracking_snr_db),
+        "noise_tracking_energy_percentile": float(used_config.noise_tracking_energy_percentile),
+        "adaptive_beta": bool(used_config.adaptive_beta),
+        "beta_adaptation_strength": float(used_config.beta_adaptation_strength),
+        "beta_low_snr_db": float(used_config.beta_low_snr_db),
+        "beta_high_snr_db": float(used_config.beta_high_snr_db),
         "noise_frames": noise_frame_count,
         "noise_frame_percent": float(used_config.noise_frame_percent),
         "noise_frames_percent": 100.0 * noise_frame_count / max(frame_count, 1),
