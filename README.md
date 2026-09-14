@@ -45,8 +45,9 @@ Noisy speech
 ~~~
 
 Speech enhancement is specified as a classical-DSP path and does not use
-Open-Unmix. No speech-enhancement Flask endpoint is currently present in this
-repository.
+Open-Unmix. The Flask endpoint accepts WAV, MP3, and FLAC speech recordings
+when the installed audio decoder supports the uploaded format, and writes
+standardized WAV outputs for playback and download.
 
 ## Requirements
 

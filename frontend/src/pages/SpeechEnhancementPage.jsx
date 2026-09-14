@@ -3,7 +3,7 @@ import { ErrorMessage, ProcessingMessage } from '../components/StatusMessage.jsx
 import WorkflowSteps from '../components/WorkflowSteps.jsx'
 import { enhanceSpeech as enhanceSpeechRequest } from '../services/api.js'
 
-const ACCEPTED_EXTENSIONS = ['wav']
+const ACCEPTED_EXTENSIONS = ['wav', 'mp3', 'flac']
 
 function acceptsAudioFile(file) {
   const extension = file.name.split('.').pop()?.toLowerCase()
@@ -46,7 +46,7 @@ function SpeechEnhancementPage({ onEnhanced }) {
 
     if (!acceptsAudioFile(file)) {
       setSelectedFile(null)
-      setError('Please select a WAV speech recording.')
+      setError('Please select a WAV, MP3, or FLAC speech recording.')
       return
     }
 
@@ -68,7 +68,7 @@ function SpeechEnhancementPage({ onEnhanced }) {
 
   async function enhanceSpeech() {
     if (!selectedFile) {
-      setError('Select a noisy speech WAV before starting enhancement.')
+      setError('Select a noisy speech audio file before starting enhancement.')
       return
     }
 
@@ -119,7 +119,7 @@ function SpeechEnhancementPage({ onEnhanced }) {
         <div className="drop-zone-copy">
           <strong>Drop a speech recording here</strong>
           <span>or browse from your device</span>
-          <small>WAV · up to 200 MB</small>
+            <small>MP3 · WAV · FLAC · up to 200 MB</small>
         </div>
         <button
           type="button"
@@ -133,7 +133,7 @@ function SpeechEnhancementPage({ onEnhanced }) {
           ref={inputRef}
           className="visually-hidden"
           type="file"
-          accept=".wav,audio/wav,audio/x-wav"
+          accept=".wav,.mp3,.flac,audio/wav,audio/mpeg,audio/flac"
           onChange={(event) => {
             selectFile(event.target.files[0])
             event.target.value = ''

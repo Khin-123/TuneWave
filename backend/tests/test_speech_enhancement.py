@@ -1,3 +1,4 @@
+from unittest.mock import patch
 import tempfile
 import unittest
 from pathlib import Path
@@ -219,6 +220,22 @@ class SpeechEnhancementTestCase(unittest.TestCase):
                 self.assertEqual(info.samplerate, sample_rate)
                 self.assertEqual(info.channels, 1)
                 self.assertEqual(info.frames, noisy.size)
+
+    def test_file_enhancement_accepts_mp3_input_name_and_writes_wav_outputs(self):
+        sample_rate = 16_000
+        _, noisy, _ = self.synthetic_speech(sample_rate, duration=0.4)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            input_path = directory / "noisy.mp3"
+            with patch(
+                "speech.wiener_enhancer.load_audio",
+                return_value=(noisy, sample_rate),
+            ) as load_audio_mock:
+                result = enhance_audio_file(input_path, directory / "outputs")
+
+            load_audio_mock.assert_called_once_with(input_path, preserve_channels=True)
+            self.assertTrue(result["paths"]["original_noisy"].is_file())
+            self.assertTrue(result["paths"]["enhanced_speech"].is_file())
 
 
     def test_auto_noise_estimation_ranks_low_energy_frames_over_full_recording(self):

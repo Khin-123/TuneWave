@@ -926,11 +926,9 @@ def enhance_audio_file(
     output_directory: str | Path,
     config: SpeechEnhancementConfig | None = None,
 ) -> dict[str, Any]:
-    """Enhance one WAV and write original_noisy.wav and enhanced_speech.wav."""
+    """Enhance decoded audio and write WAV result files."""
 
     source = Path(input_path)
-    if source.suffix.lower() != ".wav":
-        raise AudioLoadError("Speech enhancement currently supports WAV input only.")
     audio, sample_rate = load_audio(source, preserve_channels=True)
     enhanced, diagnostics = enhance_audio(audio, sample_rate, config)
     destination = Path(output_directory)

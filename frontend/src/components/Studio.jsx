@@ -6,7 +6,7 @@ export function Mark() {
 }
 const copy = {
   music: { title: 'Find every layer.', description: 'Turn one song into vocals and instrumental. Listen closer. Make it yours.', action: 'Separate audio', working: 'Separating audio...', formats: ['wav','mp3','flac'], tracks: ['Original','Vocals','Instrumental'] },
-  speech: { title: 'Let your voice through.', description: 'Reduce the background noise. Bring the conversation into focus.', action: 'Enhance speech', working: 'Enhancing speech...', formats: ['wav'], tracks: ['Original','Enhanced Speech'] },
+  speech: { title: 'Let your voice through.', description: 'Reduce the background noise. Bring the conversation into focus.', action: 'Enhance speech', working: 'Enhancing speech...', formats: ['wav','mp3','flac'], tracks: ['Original','Enhanced Speech'] },
 }
 export function UploadStudio({ mode, onComplete, onBusy = () => {} }) {
   const c = copy[mode]
@@ -64,7 +64,7 @@ export function UploadStudio({ mode, onComplete, onBusy = () => {} }) {
         <h2>Drop your audio here</h2><p>or choose a file from your device</p><button className="secondary" onClick={() => input.current.click()}>Browse files</button>
       </div>}
       {error && <p className="error" role="alert">{error}</p>}
-      <div className="upload-bottom"><button className="primary" disabled={!file || busy} onClick={process}>{busy ? c.working : c.action}<span aria-hidden="true">↗</span></button><p>{mode === 'music' ? 'Best with a stereo music recording.' : 'Start with a WAV speech recording.'}</p></div>
+      <div className="upload-bottom"><button className="primary" disabled={!file || busy} onClick={process}>{busy ? c.working : c.action}<span aria-hidden="true">↗</span></button><p>{mode === 'music' ? 'Best with a stereo music recording.' : 'MP3, WAV, or FLAC speech recording.'}</p></div>
     </div>
   </section>
 }

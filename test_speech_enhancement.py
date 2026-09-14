@@ -16,7 +16,7 @@ from backend.speech.wiener_enhancer import (
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Enhance a mono or stereo noisy-speech WAV with adaptive spectral subtraction"
+        description="Enhance mono or stereo noisy speech from WAV, MP3, or FLAC input"
     )
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
