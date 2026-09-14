@@ -46,6 +46,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--noise-tracking-alpha", type=float, default=0.04)
     parser.add_argument("--noise-tracking-snr-db", type=float, default=3.0)
     parser.add_argument("--noise-tracking-energy-percentile", type=float, default=40.0)
+    parser.add_argument("--speech-activity-margin-db", type=float, default=6.0)
     return parser
 
 
@@ -75,6 +76,8 @@ def _print_result(result: dict, label: str = "adaptive") -> None:
     print(f"{label} noise estimation: {result['noise_estimation_method']}")
     print(f"{label} noise frames selected: {result['noise_frames_selected']}")
     print(f"{label} noise-dominant frames: {result['number_of_noise_dominant_frames']}")
+    print(f"{label} speech-active frames: {result['number_of_speech_active_frames']}")
+    print(f"{label} speech-activity margin: {result['speech_activity_margin_db']:.1f} dB")
     print(f"{label} mean local SNR: {result['mean_local_snr_db']:.3f} dB")
     print(f"{label} beta min/mean/max: {result['beta_min']:.3f}/{result['beta_mean']:.3f}/{result['beta_max']:.3f}")
     print(f"{label} spectral floor: {result['spectral_floor']:.3f}")
@@ -113,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
         noise_tracking_alpha=args.noise_tracking_alpha,
         noise_tracking_snr_db=args.noise_tracking_snr_db,
         noise_tracking_energy_percentile=args.noise_tracking_energy_percentile,
+        speech_activity_margin_db=args.speech_activity_margin_db,
     )
     result = enhance_audio_file(args.input, args.output_dir, config)
     _attach_reference_snr(result, args.input, args.clean_reference)

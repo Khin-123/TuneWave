@@ -71,6 +71,7 @@ class SpeechEnhancementConfig:
     noise_tracking_alpha: float = 0.04
     noise_tracking_snr_db: float = 3.0
     noise_tracking_energy_percentile: float = 40.0
+    speech_activity_margin_db: float = 6.0
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.frame_duration_ms) or not 5 <= self.frame_duration_ms <= 100:
@@ -127,6 +128,8 @@ class SpeechEnhancementConfig:
             raise ValueError("noise_tracking_snr_db must be finite")
         if not np.isfinite(self.noise_tracking_energy_percentile) or not 0 < self.noise_tracking_energy_percentile <= 100:
             raise ValueError("noise_tracking_energy_percentile must be in the interval (0, 100]")
+        if not np.isfinite(self.speech_activity_margin_db) or self.speech_activity_margin_db < 0:
+            raise ValueError("speech_activity_margin_db must be non-negative")
 
 
 def speech_stft_parameters(
@@ -603,7 +606,7 @@ def _track_noise_powers(
     noisy_powers: list[np.ndarray],
     initial_noise_powers: list[np.ndarray],
     config: SpeechEnhancementConfig,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Track noise only on low-energy frames likely dominated by noise."""
 
     observed = np.stack(noisy_powers, axis=0)
@@ -618,6 +621,13 @@ def _track_noise_powers(
     posterior_snr_db = np.empty_like(observed, dtype=np.float64)
     frame_energy = np.mean(observed, axis=(0, 1))
     energy_limit = float(np.percentile(frame_energy, config.noise_tracking_energy_percentile))
+    initial_noise_energy = max(
+        float(np.mean(tracked)),
+        config.epsilon,
+    )
+    speech_energy_limit = initial_noise_energy * 10.0 ** (
+        config.speech_activity_margin_db / 10.0
+    )
     noise_dominant_frames = np.zeros(frame_count, dtype=bool)
 
     for frame_index in range(frame_count):
@@ -638,6 +648,7 @@ def _track_noise_powers(
         is_noise_dominant = (
             frame_snr_db <= config.noise_tracking_snr_db
             and frame_energy[frame_index] <= energy_limit
+            and frame_energy[frame_index] <= speech_energy_limit
         )
         noise_dominant_frames[frame_index] = is_noise_dominant
         if is_noise_dominant and config.noise_tracking_alpha > 0:
@@ -646,7 +657,8 @@ def _track_noise_powers(
                 + config.noise_tracking_alpha * observed_frame
             )
 
-    return tracks, local_snr_db, posterior_snr_db, noise_dominant_frames
+    speech_active_frames = frame_energy > speech_energy_limit
+    return tracks, local_snr_db, posterior_snr_db, noise_dominant_frames, speech_active_frames
 
 def _rms(values: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(values, dtype=np.float64))))
@@ -701,7 +713,13 @@ def enhance_audio(
         )
         for spectrum in spectra
     ]
-    noise_power_tracks, local_snr_db, posterior_snr_db, noise_dominant_frames = _track_noise_powers(
+    (
+        noise_power_tracks,
+        local_snr_db,
+        posterior_snr_db,
+        noise_dominant_frames,
+        speech_active_frames,
+    ) = _track_noise_powers(
         noisy_powers,
         initial_noise_powers,
         used_config,
@@ -835,6 +853,8 @@ def enhance_audio(
         "beta_mean": float(np.mean(adaptive_betas)),
         "beta_max": float(np.max(adaptive_betas)),
         "number_of_noise_dominant_frames": int(np.count_nonzero(noise_dominant_frames)),
+        "number_of_speech_active_frames": int(np.count_nonzero(speech_active_frames)),
+        "speech_activity_margin_db": float(used_config.speech_activity_margin_db),
         "beta": float(used_config.beta),
         "spectral_floor": float(used_config.spectral_floor),
         "input_rms": input_rms,

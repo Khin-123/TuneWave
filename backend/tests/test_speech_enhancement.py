@@ -343,6 +343,26 @@ class SpeechEnhancementTestCase(unittest.TestCase):
             places=6,
         )
 
+    def test_speech_activity_guard_reports_active_frames(self):
+        sample_rate = 16_000
+        clean, noisy, _ = self.synthetic_speech(sample_rate, duration=1.0)
+        _, diagnostics = enhance_audio(
+            noisy,
+            sample_rate,
+            SpeechEnhancementConfig(speech_activity_margin_db=6.0),
+            reference_audio=clean,
+        )
+        self.assertGreater(diagnostics["number_of_speech_active_frames"], 0)
+        self.assertGreaterEqual(
+            diagnostics["number_of_speech_active_frames"],
+            diagnostics["number_of_noise_dominant_frames"],
+        )
+        self.assertEqual(diagnostics["speech_activity_margin_db"], 6.0)
+
+    def test_speech_activity_margin_rejects_invalid_values(self):
+        with self.assertRaises(ValueError):
+            SpeechEnhancementConfig(speech_activity_margin_db=-1.0)
+
     def test_adaptive_beats_fixed_beta_on_same_synthetic_input(self):
         sample_rate = 16_000
         clean, noisy, _ = self.synthetic_speech(sample_rate, duration=1.0)

@@ -1,0 +1,10 @@
+Flask
+Flask-Cors
+numpy
+scipy
+librosa
+matplotlib
+soundfile
+torch
+torchaudio
+openunmix
